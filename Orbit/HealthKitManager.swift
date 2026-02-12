@@ -23,28 +23,42 @@ class HealthKitManager {
         HKQuantityType.quantityType(forIdentifier: .bodyTemperature)!,
         HKCategoryType.categoryType(forIdentifier: .sleepAnalysis)!
     ]
-    
+
     // Data types we want to read (optional - for comparing/deduplication)
     private let typesToRead: Set<HKObjectType> = [
         HKQuantityType.quantityType(forIdentifier: .heartRate)!,
         HKQuantityType.quantityType(forIdentifier: .stepCount)!,
+        HKQuantityType.quantityType(forIdentifier: .distanceWalkingRunning)!,
+        HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned)!,
+        HKQuantityType.quantityType(forIdentifier: .oxygenSaturation)!,
+        HKQuantityType.quantityType(forIdentifier: .heartRateVariabilitySDNN)!,
+        HKQuantityType.quantityType(forIdentifier: .bodyTemperature)!,
         HKCategoryType.categoryType(forIdentifier: .sleepAnalysis)!
     ]
     
     // MARK: - Authorization
-    
-    func requestAuthorization() async throws {
-        guard HKHealthStore.isHealthDataAvailable() else {
-            throw NSError(
-                domain: "HealthKitManager",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "HealthKit is not available on this device"]
-            )
-        }
         
-        try await healthStore.requestAuthorization(toShare: typesToWrite, read: typesToRead)
-        print("HealthKit authorization granted")
-    }
+        func getAuthStatus() async throws -> HKAuthorizationRequestStatus {
+            return try await healthStore.statusForAuthorizationRequest(toShare: typesToWrite, read: typesToRead)
+        }
+
+            @MainActor
+            func requestAuthorization() async throws {
+                guard HKHealthStore.isHealthDataAvailable() else {
+                    throw NSError(domain: "HealthKitManager", code: -1)
+                }
+
+                try await healthStore.requestAuthorization(
+                    toShare: typesToWrite,
+                    read: typesToRead
+                )
+            }
+
+        func canWriteData(for identifier: HKQuantityTypeIdentifier) -> Bool {
+            guard let type = HKQuantityType.quantityType(forIdentifier: identifier) else { return false }
+            let status = healthStore.authorizationStatus(for: type)
+            return status == .sharingAuthorized
+        }
     
     func isAuthorized() -> Bool {
         guard HKHealthStore.isHealthDataAvailable() else { return false }

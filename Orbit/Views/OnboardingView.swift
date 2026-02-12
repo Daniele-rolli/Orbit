@@ -9,10 +9,10 @@ import Lottie
 
 struct OnboardingView: View {
     @Binding var hasSeenOnboarding: Bool
-    @State private var healthKitManager = HealthKitManager()
     @State private var ringSessionManager = RingSessionManager()
     @State private var currentPage = 0
     @State private var isRequestingAuth = false
+    private let healthKitManager = HealthKitManager()
     
     var body: some View {
         ZStack {
@@ -59,7 +59,6 @@ struct OnboardingView: View {
                             Text("Continue")
                                 .frame(maxWidth: .infinity)
                                 .frame(height: 50)
-                                .background(Color.accentColor)
                                 .foregroundColor(.white)
                                 .font(.system(size: 17, weight: .semibold))
                                 .cornerRadius(13)
@@ -92,7 +91,6 @@ struct OnboardingView: View {
                             Text("Pair Ring")
                                 .frame(maxWidth: .infinity)
                                 .frame(height: 50)
-                                .background(Color.accentColor)
                                 .foregroundColor(.white)
                                 .font(.system(size: 17, weight: .semibold))
                                 .cornerRadius(13)
@@ -145,16 +143,10 @@ struct OnboardingView: View {
                 if #available(iOS 26.0, *) {
                     Button(action: authorizeHealthKit) {
                         HStack(spacing: 8) {
-                            if isRequestingAuth {
-                                ProgressView()
-                                    .tint(.white)
-                            }
                             Text(isRequestingAuth ? "Connecting..." : "Continue")
                         }
                         .frame(maxWidth: .infinity)
                         .frame(height: 50)
-                        .background(Color.accentColor)
-                        .foregroundColor(.white)
                         .font(.system(size: 17, weight: .semibold))
                         .cornerRadius(13)
                     }
@@ -211,7 +203,6 @@ struct OnboardingView: View {
                         Text("Continue")
                             .frame(maxWidth: .infinity)
                             .frame(height: 50)
-                            .background(Color.accentColor)
                             .foregroundColor(.white)
                             .font(.system(size: 17, weight: .semibold))
                             .cornerRadius(13)
@@ -258,15 +249,16 @@ struct OnboardingView: View {
         HapticManager.shared.light()
         
         Task {
-            try? await healthKitManager.requestAuthorization()
-            await MainActor.run {
+            do {
+                try await healthKitManager.requestAuthorization()
                 isRequestingAuth = false
-                HapticManager.shared.success()
                 completeOnboarding()
+            } catch {
+                isRequestingAuth = false
             }
         }
     }
-    
+
     private func completeOnboarding() {
         HapticManager.shared.success()
         withAnimation(.easeInOut(duration: 0.3)) {

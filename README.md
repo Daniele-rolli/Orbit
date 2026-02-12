@@ -39,7 +39,7 @@ Orbit is currently focused on:
 - **SwiftUI**
 - **CoreBluetooth**
 - **Lottie**
-- Local storage (Core Data / SwiftData — update if applicable)
+- Local storage with Core Data
 - iOS 17+
 
 ## Requirements

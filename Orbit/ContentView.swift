@@ -4,19 +4,22 @@
 //
 //
 
-import SwiftUI
 import AccessorySetupKit
 import SleepChartKit
+import SwiftUI
 
 // MARK: - Widget Types
+
 enum WidgetType: String, CaseIterable, Identifiable, Codable {
     case heartRate = "Heart Rate"
     case spo2 = "Blood Oxygen"
     case sleep = "Sleep"
     case steps = "Steps"
-    
-    var id: String { self.rawValue }
-    
+
+    var id: String {
+        rawValue
+    }
+
     var icon: String {
         switch self {
         case .heartRate: return "heart.fill"
@@ -25,7 +28,7 @@ enum WidgetType: String, CaseIterable, Identifiable, Codable {
         case .steps: return "figure.walk"
         }
     }
-    
+
     var color: Color {
         switch self {
         case .heartRate: return .red
@@ -40,34 +43,35 @@ struct WidgetItem: Identifiable, Codable, Equatable {
     let id: UUID
     let type: WidgetType
     var order: Int
-    
+
     init(type: WidgetType, order: Int, id: UUID? = nil) {
         self.id = id ?? UUID()
         self.type = type
         self.order = order
     }
-    
+
     static func == (lhs: WidgetItem, rhs: WidgetItem) -> Bool {
         lhs.id == rhs.id
     }
 }
 
 // MARK: - Main Content View
+
 struct ContentView: View {
     @State var ringSessionManager = RingSessionManager()
     @State var batteryInfo: BatteryInfo?
-    
+
     @State private var widgets: [WidgetItem] = [
         WidgetItem(type: .heartRate, order: 0),
         WidgetItem(type: .spo2, order: 1),
         WidgetItem(type: .sleep, order: 2),
-        WidgetItem(type: .steps, order: 3)
+        WidgetItem(type: .steps, order: 3),
     ]
-    
+
     @State private var showingReorderSheet = false
     @State private var selectedTab = 0
     @State private var isRefreshing = false
-    
+
     var body: some View {
         TabView(selection: $selectedTab) {
             dashboardView
@@ -85,7 +89,7 @@ struct ContentView: View {
         .environment(ringSessionManager)
         .onChange(of: ringSessionManager.peripheralReady) {
             if ringSessionManager.peripheralReady {
-                ringSessionManager.requestBatteryInfo() { info in
+                ringSessionManager.requestBatteryInfo { info in
                     batteryInfo = info
                 }
                 ringSessionManager.startRealtimeSteps()
@@ -98,8 +102,9 @@ struct ContentView: View {
             try? await ringSessionManager.loadDataFromEncryptedStorage()
         }
     }
-    
+
     // MARK: - Dashboard View
+
     private var dashboardView: some View {
         NavigationStack {
             ScrollView {
@@ -131,9 +136,9 @@ struct ContentView: View {
             }
         }
     }
-    
+
     // MARK: - Widget Card
-    @ViewBuilder
+
     private func widgetCard(for widget: WidgetItem) -> some View {
         NavigationLink(destination: destinationView(for: widget)) {
             Group {
@@ -156,7 +161,7 @@ struct ContentView: View {
             .tint(.primary)
         }
     }
-    
+
     @ViewBuilder
     private func destinationView(for widget: WidgetItem) -> some View {
         switch widget.type {
@@ -172,18 +177,18 @@ struct ContentView: View {
     }
 
     // MARK: - Ring View
-    @ViewBuilder
+
     private func makeRingView(ring: ASAccessory) -> some View {
         HStack {
             Image("colmi")
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(height: 60)
-            
+
             VStack(alignment: .leading, spacing: 4) {
                 Text(ring.displayName)
                     .font(.headline)
-                
+
                 if let batteryInfo {
                     HStack(spacing: 6) {
                         BatteryView(isCharging: batteryInfo.charging, batteryLevel: batteryInfo.batteryLevel)
@@ -195,38 +200,40 @@ struct ContentView: View {
             }
         }
     }
-    
+
     // MARK: - Refresh Data
+
     @MainActor
     private func refreshDashboard() async {
         guard ringSessionManager.peripheralConnected else {
             print("Not connected to ring")
             return
         }
-        
+
         isRefreshing = true
-        
+
         await withCheckedContinuation { continuation in
             ringSessionManager.fetchAllHistoricalData {
                 continuation.resume()
             }
         }
-        
+
         try? await ringSessionManager.saveDataToEncryptedStorage()
-        
+
         if ringSessionManager.isHealthKitAuthorized() {
             try? await ringSessionManager.syncToHealthKit()
         }
-        
+
         isRefreshing = false
     }
 }
 
 // MARK: - Reorder Widgets Sheet
+
 struct ReorderWidgetsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Binding var widgets: [WidgetItem]
-    
+
     @State private var editingWidgets: [WidgetItem] = []
     @State private var editMode: EditMode = .active
 
@@ -239,12 +246,12 @@ struct ReorderWidgetsSheet: View {
                             Circle()
                                 .fill(widget.type.color)
                                 .frame(width: 40, height: 40)
-                            
+
                             Image(systemName: widget.type.icon)
                                 .font(.system(size: 18, weight: .semibold))
                                 .foregroundStyle(.white)
                         }
-                        
+
                         Text(widget.type.rawValue)
                         Spacer()
                     }
@@ -280,31 +287,32 @@ struct ReorderWidgetsSheet: View {
 }
 
 // MARK: - Drop Delegate
+
 struct DropViewDelegate: DropDelegate {
     let destinationItem: WidgetItem
     @Binding var items: [WidgetItem]
     @Binding var draggedItem: WidgetItem?
-    
-    func dropUpdated(info: DropInfo) -> DropProposal? {
+
+    func dropUpdated(info _: DropInfo) -> DropProposal? {
         return DropProposal(operation: .move)
     }
-    
-    func performDrop(info: DropInfo) -> Bool {
+
+    func performDrop(info _: DropInfo) -> Bool {
         draggedItem = nil
         return true
     }
-    
-    func dropEntered(info: DropInfo) {
+
+    func dropEntered(info _: DropInfo) {
         guard let draggedItem = draggedItem else { return }
-        
+
         if draggedItem != destinationItem {
             let from = items.firstIndex(of: draggedItem)
             let to = items.firstIndex(of: destinationItem)
-            
+
             if let from = from, let to = to {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                     items.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
-                    
+
                     for index in items.indices {
                         items[index].order = index
                     }
@@ -318,14 +326,14 @@ struct DropViewDelegate: DropDelegate {
 
 struct HeartRateWidget: View {
     @Environment(RingSessionManager.self) var ringSessionManager
-    
+
     private var latestHeartRate: Int? {
         if let realtime = ringSessionManager.realtimeHeartRate, realtime > 0 {
             return realtime
         }
         return ringSessionManager.heartRateSamples.last?.heartRate
     }
-    
+
     private var recentSamples: [Int] {
         let samples = ringSessionManager.heartRateSamples.suffix(20)
         return samples.map { $0.heartRate }
@@ -361,17 +369,17 @@ struct HeartRateWidget: View {
                             .font(.system(size: 32, weight: .semibold, design: .rounded))
                             .foregroundStyle(.secondary)
                     }
-                    
+
                     Text("BPM")
                         .font(.system(size: 20, weight: .semibold, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
-                
+
                 Spacer()
 
                 if !recentSamples.isEmpty {
                     HStack(alignment: .bottom, spacing: 1.5) {
-                        ForEach(0..<recentSamples.count, id: \.self) { i in
+                        ForEach(0 ..< recentSamples.count, id: \.self) { i in
                             Capsule()
                                 .fill(Color.red.opacity(0.6))
                                 .frame(width: 2, height: heartRateHeight(for: recentSamples[i]))
@@ -394,7 +402,7 @@ struct HeartRateWidget: View {
 
 struct SPO2Widget: View {
     @Environment(RingSessionManager.self) var ringSessionManager
-    
+
     private var latestSpO2: Int? {
         // Check realtime first
         if let realtime = ringSessionManager.realtimeSpO2, realtime > 0 {
@@ -403,7 +411,7 @@ struct SPO2Widget: View {
         // Fall back to latest sample
         return ringSessionManager.spO2Samples.last?.spO2
     }
-    
+
     private var averageSpO2: Double? {
         guard !ringSessionManager.spO2Samples.isEmpty else { return nil }
         let sum = ringSessionManager.spO2Samples.reduce(0) { $0 + $1.spO2 }
@@ -432,7 +440,7 @@ struct SPO2Widget: View {
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.tertiary)
             }
-            
+
             HStack(alignment: .bottom, spacing: 12) {
                 // Metric
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
@@ -444,14 +452,14 @@ struct SPO2Widget: View {
                             .font(.system(size: 32, weight: .semibold, design: .rounded))
                             .foregroundStyle(.secondary)
                     }
-                    
+
                     Text("%")
                         .font(.system(size: 20, weight: .semibold, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
-                
+
                 Spacer()
-                
+
                 // Average indicator
                 if let avg = averageSpO2 {
                     VStack(alignment: .trailing, spacing: 2) {
@@ -484,7 +492,7 @@ struct SleepWidget: View {
             }
             return SleepSample(stage: stage, startDate: record.startTime, endDate: record.endTime)
         }
-    } 
+    }
 
     private var totalSleepMinutes: Int {
         sleepSamples
@@ -507,110 +515,109 @@ struct SleepWidget: View {
     }
 
     var body: some View {
-            VStack(alignment: .leading, spacing: 16) {
-                // Header
-                HStack {
-                    Label("Sleep", systemImage: "bed.double.fill")
-                        .font(.subheadline.weight(.bold))
-                        .foregroundStyle(.blue)
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(.tertiary)
-                }
-
-                // Main Content Row
-                HStack(alignment: .center, spacing: 12) {
-                    
-                    // Left Side: Large Metrics
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(alignment: .firstTextBaseline, spacing: 2) {
-                            Text("\(durationText.h)")
-                                .font(.system(size: 36, weight: .bold, design: .rounded))
-                            Text("h")
-                                .font(.headline)
-                                .foregroundStyle(.secondary)
-                            
-                            Text("\(durationText.m)")
-                                .font(.system(size: 36, weight: .bold, design: .rounded))
-                                .padding(.leading, 4)
-                            Text("m")
-                                .font(.headline)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        if let bed = bedtime, let wake = wakeTime {
-                            Text("\(bed.formatted(.dateTime.hour().minute())) - \(wake.formatted(.dateTime.hour().minute()))")
-                                .font(.caption)
-                                .fontWeight(.medium)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    Spacer()
-
-                    // Right Side: Small Square Graph or Empty State
-                    Group {
-                        if sleepSamples.isEmpty {
-                            smallEmptyStateView
-                        } else {
-                            SleepTimelineGraph(samples: sleepSamples)
-                                .frame(width: 100, height: 100)
-                                .clipShape(RoundedRectangle(cornerRadius: 12))
-                        }
-                    }
-                }
-            }
-            .padding()
-            .background(Color(.secondarySystemGroupedBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        }
-
-        // Refactored Empty State for a small square layout
-        private var smallEmptyStateView: some View {
-            VStack(spacing: 4) {
-                Image(systemName: "chart.line.uptrend.xyaxis")
-                    .font(.system(size: 24))
-                    .foregroundStyle(.quaternary)
-                
-                Text("No Data")
+        VStack(alignment: .leading, spacing: 16) {
+            // Header
+            HStack {
+                Label("Sleep", systemImage: "bed.double.fill")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(.blue)
+                Spacer()
+                Image(systemName: "chevron.right")
                     .font(.caption2.weight(.bold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.tertiary)
             }
-            .frame(width: 100, height: 100)
-            .background(Color(.tertiarySystemFill))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
+
+            // Main Content Row
+            HStack(alignment: .center, spacing: 12) {
+                // Left Side: Large Metrics
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline, spacing: 2) {
+                        Text("\(durationText.h)")
+                            .font(.system(size: 36, weight: .bold, design: .rounded))
+                        Text("h")
+                            .font(.headline)
+                            .foregroundStyle(.secondary)
+
+                        Text("\(durationText.m)")
+                            .font(.system(size: 36, weight: .bold, design: .rounded))
+                            .padding(.leading, 4)
+                        Text("m")
+                            .font(.headline)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if let bed = bedtime, let wake = wakeTime {
+                        Text("\(bed.formatted(.dateTime.hour().minute())) - \(wake.formatted(.dateTime.hour().minute()))")
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Spacer()
+
+                // Right Side: Small Square Graph or Empty State
+                Group {
+                    if sleepSamples.isEmpty {
+                        smallEmptyStateView
+                    } else {
+                        SleepTimelineGraph(samples: sleepSamples)
+                            .frame(width: 100, height: 100)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                }
+            }
         }
+        .padding()
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
+
+    /// Refactored Empty State for a small square layout
+    private var smallEmptyStateView: some View {
+        VStack(spacing: 4) {
+            Image(systemName: "chart.line.uptrend.xyaxis")
+                .font(.system(size: 24))
+                .foregroundStyle(.quaternary)
+
+            Text("No Data")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+        }
+        .frame(width: 100, height: 100)
+        .background(Color(.tertiarySystemFill))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+}
 
 struct StepsWidget: View {
     @Environment(RingSessionManager.self) var ringSessionManager
-    
+
     private var todaySteps: Int {
         return ringSessionManager.liveActivity.steps
     }
-    
+
     private var todayCalories: Int {
         return ringSessionManager.liveActivity.calories
     }
-    
+
     private var todayDistance: Double {
         // Distance in kilometers
         return Double(ringSessionManager.liveActivity.distance) / 1000.0
     }
-    
+
     private var stepGoal: Int {
         return 10000
     }
-    
+
     private var calorieGoal: Int {
         return 500 // Active calories goal
     }
-    
+
     private var distanceGoal: Double {
         return 5.0 // 5 km
     }
-    
+
     @State private var stepsProgress: CGFloat = 0.0
     @State private var caloriesProgress: CGFloat = 0.0
     @State private var distanceProgress: CGFloat = 0.0
@@ -634,7 +641,7 @@ struct StepsWidget: View {
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.tertiary)
             }
-            
+
             HStack(spacing: 20) {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 4) {
@@ -647,7 +654,7 @@ struct StepsWidget: View {
                             .font(.system(size: 12, weight: .regular, design: .rounded))
                             .foregroundStyle(.secondary)
                     }
-                    
+
                     HStack(spacing: 4) {
                         Circle()
                             .fill(.red)
@@ -658,7 +665,7 @@ struct StepsWidget: View {
                             .font(.system(size: 12, weight: .regular, design: .rounded))
                             .foregroundStyle(.secondary)
                     }
-                    
+
                     HStack(spacing: 4) {
                         Circle()
                             .fill(.cyan)
@@ -670,9 +677,9 @@ struct StepsWidget: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                
+
                 Spacer()
-                
+
                 // Activity Rings
                 StackedActivityRingView(
                     outterRingValue: $stepsProgress,
@@ -694,14 +701,14 @@ struct StepsWidget: View {
         .onAppear {
             updateProgress()
         }
-        .onChange(of: todaySteps) { oldValue, newValue in
+        .onChange(of: todaySteps) { _, _ in
             updateProgress()
         }
-        .onChange(of: todayCalories) { oldValue, newValue in
+        .onChange(of: todayCalories) { _, _ in
             updateProgress()
         }
     }
-    
+
     private func updateProgress() {
         withAnimation(.spring(response: 0.6, dampingFraction: 0.7)) {
             stepsProgress = min(1.5, CGFloat(todaySteps) / CGFloat(stepGoal))

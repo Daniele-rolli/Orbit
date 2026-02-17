@@ -38,4 +38,3 @@ struct TemperatureSample: Codable {
     let timestamp: Date
     let temperature: Double // in Celsius
 }
-

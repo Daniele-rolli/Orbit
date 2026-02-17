@@ -12,4 +12,3 @@ struct LiveActivity {
     var distance: Int // in meters
     var calories: Int
 }
-

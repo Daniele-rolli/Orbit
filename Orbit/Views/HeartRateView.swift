@@ -5,9 +5,9 @@
 //  Created by Daniele Rolli on 1/28/26.
 //
 
-import SwiftUI
 import Charts
 import HealthKit
+import SwiftUI
 
 struct HeartRateView: View {
     @Environment(RingSessionManager.self) var ring
@@ -234,10 +234,10 @@ extension HeartRateView {
     private var yAxisDomain: ClosedRange<Int> {
         let values = filteredSamples.map(\.heartRate)
         guard let min = values.min(), let max = values.max() else {
-            return 40...200
+            return 40 ... 200
         }
         let padding = (max - min) / 5
-        return (min - padding)...(max + padding)
+        return (min - padding) ... (max + padding)
     }
 
     private var averageHeartRate: Int? {

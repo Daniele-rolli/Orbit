@@ -1,5 +1,5 @@
 //
-//  Displat.swift
+//  Display.swift
 //  Orbit
 //
 //  Created by Daniele Rolli on 1/31/26.
@@ -16,7 +16,7 @@ struct DisplaySettings {
     var startMinute: Int
     var endHour: Int
     var endMinute: Int
-    
+
     enum WearLocation: UInt8 {
         case left = 0x01
         case right = 0x02

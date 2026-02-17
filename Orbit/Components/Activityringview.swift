@@ -9,19 +9,19 @@ import SwiftUI
 
 extension Color {
     func lighter(by percentage: CGFloat = 30.0) -> Color {
-        return self.adjust(by: abs(percentage))
+        return adjust(by: abs(percentage))
     }
-    
+
     func darker(by percentage: CGFloat = 30.0) -> Color {
-        return self.adjust(by: -1 * abs(percentage))
+        return adjust(by: -1 * abs(percentage))
     }
-    
+
     func adjust(by percentage: CGFloat = 30.0) -> Color {
         var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 1.0
         #if canImport(UIKit)
-        UIColor(self).getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+            UIColor(self).getRed(&red, green: &green, blue: &blue, alpha: &alpha)
         #elseif canImport(AppKit)
-        NSColor(self).getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+            NSColor(self).getRed(&red, green: &green, blue: &blue, alpha: &alpha)
         #endif
         return Color(red: min(red + percentage / 100, 1.0),
                      green: min(green + percentage / 100, 1.0),
@@ -32,28 +32,28 @@ extension Color {
 
 struct ActivityRingView: View {
     @Binding var progress: CGFloat
-    
+
     var mainColor: Color = .red
     var lineWidth: CGFloat = 20
-    
+
     var endColor: Color {
         mainColor.darker(by: 15.0)
     }
-    
+
     var startColor: Color {
         mainColor.lighter(by: 15.0)
     }
-    
+
     var backgroundColor: Color {
         return mainColor.opacity(0.15)
     }
-    
+
     var body: some View {
         GeometryReader { geo in
             ZStack {
                 Circle()
                     .stroke(backgroundColor, lineWidth: lineWidth)
-                
+
                 Circle()
                     .trim(from: 0, to: progress)
                     .stroke(
@@ -66,12 +66,11 @@ struct ActivityRingView: View {
                         style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
                     )
                     .rotationEffect(.degrees(-90))
-                
+
                 Circle()
                     .frame(width: lineWidth, height: lineWidth)
                     .foregroundColor(startColor)
                     .offset(y: -1 * (geo.size.height / 2))
-                
             }
             .rotationEffect(overlapRotatation())
             .frame(idealWidth: 300, idealHeight: 300, alignment: .center)
@@ -82,7 +81,7 @@ struct ActivityRingView: View {
             )
         }
     }
-    
+
     func overlapRotatation() -> Angle {
         let overlapProgress = progress - 1.0
         let degrees = overlapProgress * 360.0

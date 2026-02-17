@@ -17,18 +17,18 @@ struct UserPreferences {
     var systolicBP: Int
     var diastolicBP: Int
     var hrWarningThreshold: Int
-    
+
     enum Gender: UInt8 {
         case male = 0x00
         case female = 0x01
         case other = 0x02
     }
-    
+
     enum MeasurementSystem: UInt8 {
         case metric = 0x00
         case imperial = 0x01
     }
-    
+
     enum TimeFormat: UInt8 {
         case twentyFourHour = 0x00
         case twelveHour = 0x01

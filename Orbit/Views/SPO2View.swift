@@ -5,8 +5,8 @@
 //  Created by Cyril Zakka on 3/17/25.
 //
 
-import SwiftUI
 import Charts
+import SwiftUI
 
 struct SPO2View: View {
     @Environment(RingSessionManager.self) var ring
@@ -53,6 +53,7 @@ struct SPO2View: View {
 }
 
 // MARK: - Subviews
+
 extension SPO2View {
     private var latestSpO2Card: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -241,6 +242,7 @@ extension SPO2View {
 }
 
 // MARK: - Computed Properties & Helpers
+
 extension SPO2View {
     private var filteredSamples: [SpO2Sample] {
         let now = Date()
@@ -268,10 +270,10 @@ extension SPO2View {
     private var yAxisDomain: ClosedRange<Int> {
         let values = filteredSamples.map(\.spO2)
         guard let minValue = values.min(), let maxValue = values.max() else {
-            return 85...100
+            return 85 ... 100
         }
         let padding = Swift.max(2, (maxValue - minValue) / 5)
-        return Swift.max(85, minValue - padding)...Swift.min(100, maxValue + padding)
+        return Swift.max(85, minValue - padding) ... Swift.min(100, maxValue + padding)
     }
 
     private var averageSpO2: Int? {
@@ -283,24 +285,24 @@ extension SPO2View {
     private func statusColor(_ spO2: Int?) -> Color {
         guard let spO2 else { return .gray }
         switch spO2 {
-        case 95...100: return .cyan
-        case 90..<95: return .orange
+        case 95 ... 100: return .cyan
+        case 90 ..< 95: return .orange
         default: return .red
         }
     }
 
     private func statusIcon(_ spO2: Int) -> String {
         switch spO2 {
-        case 95...100: return "checkmark.circle.fill"
-        case 90..<95: return "exclamationmark.triangle.fill"
+        case 95 ... 100: return "checkmark.circle.fill"
+        case 90 ..< 95: return "exclamationmark.triangle.fill"
         default: return "exclamationmark.circle.fill"
         }
     }
 
     private func statusText(_ spO2: Int) -> String {
         switch spO2 {
-        case 95...100: return "Normal"
-        case 90..<95: return "Low"
+        case 95 ... 100: return "Normal"
+        case 90 ..< 95: return "Low"
         default: return "Very Low"
         }
     }

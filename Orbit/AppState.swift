@@ -15,6 +15,6 @@ class AppState: ObservableObject {
     }
 
     init() {
-        self.hasSeenOnboarding = UserDefaults.standard.bool(forKey: "hasSeenOnboarding")
+        hasSeenOnboarding = UserDefaults.standard.bool(forKey: "hasSeenOnboarding")
     }
 }

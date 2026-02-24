@@ -4,8 +4,9 @@
 //
 
 import Foundation
+import SwiftUI
 
-struct SleepRecord: Codable {
+struct SleepRecord: Codable, Equatable {
     let startTime: Date
     let endTime: Date
     let sleepType: SleepType
@@ -28,6 +29,15 @@ struct SleepRecord: Codable {
             case .deep: return "Deep"
             case .rem: return "REM"
             case .awake: return "Awake"
+            }
+        }
+
+        var chartColor: Color {
+            switch self {
+            case .light: return .blue
+            case .deep: return .purple
+            case .rem: return .green
+            case .awake: return .orange
             }
         }
     }

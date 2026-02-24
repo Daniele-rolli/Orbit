@@ -6,9 +6,11 @@
 //
 
 import AccessorySetupKit
+import BackgroundTasks
 import CoreBluetooth
 import Foundation
 import SwiftUI
+import UserNotifications
 
 // MARK: - RingSessionManager
 
@@ -48,11 +50,16 @@ class RingSessionManager: NSObject {
     // MARK: - Live Data
 
     var currentBatteryInfo: BatteryInfo?
-    var liveActivity = LiveActivity(steps: 0, distance: 0, calories: 0)
-    var realtimeHeartRate: Int?
-    var realtimeSpO2: Int?
-    var realtimeStress: Int?
-    var realtimeTemperature: Double?
+
+    // Cumulative day totals pushed by the ring via 0x73/0x12 notification.
+    // These are SEPARATE from activitySamples (which are per-slot deltas from historical sync).
+    // Views should prefer these when available (more current), fall back to summing activitySamples.
+    var liveStepTotal: Int = 0
+    var liveCalorieTotal: Int = 0
+    var liveDistanceTotal: Int = 0
+
+    // Result of the last manual "measure now" heart rate tap — not a stream
+    var latestMeasuredHeartRate: Int?
 
     // MARK: - Managers
 
@@ -62,9 +69,7 @@ class RingSessionManager: NSObject {
     var bluetoothManager: BluetoothManager!
     var commandManager: CommandManager!
     var syncManager: SyncManager!
-    var realtimeManager: RealtimeManager!
     var storageManager: StorageManager!
-    var healthKitManager: HealthKitManager!
 
     // MARK: - Callbacks
 
@@ -78,6 +83,8 @@ class RingSessionManager: NSObject {
     var temperatureHistoryCallback: (([TemperatureSample]) -> Void)?
     var sleepHistoryCallback: (([SleepRecord]) -> Void)?
     var syncCompletionCallback: (() -> Void)?
+    /// True while a BLE sync chain is in progress. Guards against concurrent syncs.
+    var isSyncing: Bool = false
 
     // MARK: - Initialization
 
@@ -87,19 +94,14 @@ class RingSessionManager: NSObject {
         bluetoothManager = BluetoothManager(sessionManager: self)
         commandManager = CommandManager(sessionManager: self)
         syncManager = SyncManager(sessionManager: self)
-        realtimeManager = RealtimeManager(sessionManager: self)
         storageManager = StorageManager()
-        healthKitManager = HealthKitManager()
 
         session.activate(on: DispatchQueue.main, eventHandler: handleSessionEvent)
 
+        // Load persisted data immediately — UI shows local data before ring connects
         Task {
             try? await loadDataFromEncryptedStorage()
         }
-    }
-
-    deinit {
-        realtimeManager.stopRealtimeSteps()
     }
 
     // MARK: - Session Management
@@ -132,8 +134,11 @@ class RingSessionManager: NSObject {
     private func saveRing(ring: ASAccessory) {
         currentRing = ring
 
-        // FIX: detect ring model from the advertised BLE name
-        ringModel = RingConstants.RingModel.from(advertisedName: ring.displayName)
+        let nameToMatch = ring.displayName
+        let detectedModel = RingConstants.RingModel.from(advertisedName: nameToMatch)
+        ringModel = detectedModel == .unknown
+            ? (peripheral?.name.map(RingConstants.RingModel.from(advertisedName:)) ?? .unknown)
+            : detectedModel
 
         if manager == nil {
             manager = CBCentralManager(delegate: bluetoothManager, queue: nil)
@@ -171,45 +176,117 @@ class RingSessionManager: NSObject {
 
     // MARK: - Post Connection Initialization
 
+    /// Called after BLE services are discovered. Sends time, phone name, reads battery,
+    /// restores saved monitoring preferences to the ring, then kicks off history sync.
     func postConnectInitialization() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            // Re-detect model from BLE peripheral name if still unknown
+            if self.ringModel == .unknown, let peripheralName = self.peripheral?.name {
+                let detected = RingConstants.RingModel.from(advertisedName: peripheralName)
+                if detected != .unknown { self.ringModel = detected }
+            }
+
             self.commandManager.setPhoneName()
             self.commandManager.setDateTime()
             self.commandManager.requestBatteryInfo()
             self.commandManager.requestSettingsFromRing()
+
+            // Reapply monitoring preferences (in case ring was factory-reset or replaced)
+            self.restoreMonitoringPreferences()
+
+            // Kick off historical data sync via the async path so pull-to-refresh
+            // can coordinate with this sync without spawning a second parallel chain.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                Task { @MainActor in
+                    await self.fetchAllHistoricalDataAsync()
+                    try? await self.saveDataToEncryptedStorage()
+                }
+            }
         }
+    }
+
+    // MARK: - Monitoring Preferences
+
+    /// Enable all monitoring features. Call after pairing or to reset defaults.
+    func enableAllMonitoring() {
+        let hrInterval = UserDefaults.standard.integer(forKey: "hrIntervalMinutes")
+        setHeartRateMeasurementInterval(minutes: hrInterval > 0 ? hrInterval : 30)
+        setSpO2AllDayMonitoring(enabled: true)
+        setStressMonitoring(enabled: true)
+        setHRVAllDayMonitoring(enabled: true)
+        if ringModel.supportsTemperature {
+            setTemperatureAllDayMonitoring(enabled: true)
+        }
+        // Persist defaults
+        UserDefaults.standard.set(true, forKey: "spo2AllDay")
+        UserDefaults.standard.set(true, forKey: "stressMonitoring")
+        UserDefaults.standard.set(true, forKey: "hrvAllDay")
+        UserDefaults.standard.set(true, forKey: "tempAllDay")
+    }
+
+    /// Restore monitoring preferences from UserDefaults to the ring.
+    private func restoreMonitoringPreferences() {
+        let defaults = UserDefaults.standard
+        let hrInterval = defaults.integer(forKey: "hrIntervalMinutes")
+        setHeartRateMeasurementInterval(minutes: hrInterval > 0 ? hrInterval : 30)
+        setSpO2AllDayMonitoring(enabled: defaults.bool(forKey: "spo2AllDay"))
+        setStressMonitoring(enabled: defaults.bool(forKey: "stressMonitoring"))
+        setHRVAllDayMonitoring(enabled: defaults.bool(forKey: "hrvAllDay"))
+        if ringModel.supportsTemperature {
+            setTemperatureAllDayMonitoring(enabled: defaults.bool(forKey: "tempAllDay"))
+        }
+    }
+
+    // MARK: - Battery Low Notification
+
+    func sendLowBatteryNotification(level: Int) {
+        guard UserDefaults.standard.bool(forKey: "notificationsEnabled") else { return }
+        guard UserDefaults.standard.bool(forKey: "lowBatteryAlert") else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "Ring Battery Low"
+        content.body = "Your ring battery is at \(level)%. Please charge soon."
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: "lowBattery-\(level)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    func sendDisconnectedNotification() {
+        guard UserDefaults.standard.bool(forKey: "notificationsEnabled") else { return }
+        guard UserDefaults.standard.bool(forKey: "deviceDisconnectedAlert") else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "Ring Disconnected"
+        content.body = "Orbit lost connection to your ring."
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: "disconnected-\(Date().timeIntervalSince1970)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
     }
 
     // MARK: - Command Manager API
 
-    func setPhoneName(name: String = "GB") {
-        commandManager.setPhoneName(name: name)
-    }
-
-    func setDateTime() {
-        commandManager.setDateTime()
-    }
-
-    func findDevice() {
-        commandManager.findDevice()
-    }
-
-    func powerOff() {
-        commandManager.powerOff()
-    }
-
-    func factoryReset() {
-        commandManager.factoryReset()
-    }
+    func setPhoneName(name: String = "GB") { commandManager.setPhoneName(name: name) }
+    func setDateTime() { commandManager.setDateTime() }
+    func findDevice() { commandManager.findDevice() }
+    func powerOff() { commandManager.powerOff() }
+    func factoryReset() { commandManager.factoryReset() }
 
     func requestBatteryInfo(completion: ((BatteryInfo) -> Void)? = nil) {
         batteryStatusCallback = completion
         commandManager.requestBatteryInfo()
     }
 
-    func setUserPreferences(_ prefs: UserPreferences) {
-        commandManager.setUserPreferences(prefs)
-    }
+    func setUserPreferences(_ prefs: UserPreferences) { commandManager.setUserPreferences(prefs) }
 
     func setDisplaySettings(_ settings: DisplaySettings) {
         guard ringModel.hasDisplay else {
@@ -219,21 +296,10 @@ class RingSessionManager: NSObject {
         commandManager.setDisplaySettings(settings)
     }
 
-    func setHeartRateMeasurementInterval(minutes: Int) {
-        commandManager.setHeartRateMeasurementInterval(minutes: minutes)
-    }
-
-    func setSpO2AllDayMonitoring(enabled: Bool) {
-        commandManager.setSpO2AllDayMonitoring(enabled: enabled)
-    }
-
-    func setStressMonitoring(enabled: Bool) {
-        commandManager.setStressMonitoring(enabled: enabled)
-    }
-
-    func setHRVAllDayMonitoring(enabled: Bool) {
-        commandManager.setHRVAllDayMonitoring(enabled: enabled)
-    }
+    func setHeartRateMeasurementInterval(minutes: Int) { commandManager.setHeartRateMeasurementInterval(minutes: minutes) }
+    func setSpO2AllDayMonitoring(enabled: Bool) { commandManager.setSpO2AllDayMonitoring(enabled: enabled) }
+    func setStressMonitoring(enabled: Bool) { commandManager.setStressMonitoring(enabled: enabled) }
+    func setHRVAllDayMonitoring(enabled: Bool) { commandManager.setHRVAllDayMonitoring(enabled: enabled) }
 
     func setTemperatureAllDayMonitoring(enabled: Bool) {
         guard ringModel.supportsTemperature else {
@@ -243,42 +309,58 @@ class RingSessionManager: NSObject {
         commandManager.setTemperatureAllDayMonitoring(enabled: enabled)
     }
 
-    func requestSettingsFromRing() {
-        commandManager.requestSettingsFromRing()
-    }
-
-    func triggerManualHeartRate() {
-        commandManager.triggerManualHeartRate()
-    }
-
-    // MARK: - Realtime Manager API
-
-    func startRealtimeHeartRate() {
-        realtimeManager.startRealtimeHeartRate()
-    }
-
-    func stopRealtimeHeartRate() {
-        realtimeManager.stopRealtimeHeartRate()
-    }
-
-    func startRealtimeSteps() {
-        realtimeManager.startRealtimeSteps()
-    }
-
-    func stopRealtimeSteps() {
-        realtimeManager.stopRealtimeSteps()
-    }
+    func requestSettingsFromRing() { commandManager.requestSettingsFromRing() }
+    func triggerManualHeartRate() { commandManager.triggerManualHeartRate() }
 
     // MARK: - Sync Manager API
 
+    /// Async wrapper around the BLE sync chain. Serial — if a sync is already running
+    /// this waits for it to complete rather than starting a second parallel chain.
+    func fetchAllHistoricalDataAsync() async {
+        // If already syncing, wait for it to finish rather than racing.
+        if isSyncing {
+            print("Sync already in progress — waiting for it to complete")
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                let existing = syncCompletionCallback
+                syncCompletionCallback = {
+                    existing?()          // honour the original waiter
+                    cont.resume()
+                }
+            }
+            return
+        }
+
+        isSyncing = true
+
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                var resumed = false
+                syncCompletionCallback = {
+                    guard !resumed else { return }
+                    resumed = true
+                    cont.resume()
+                }
+                syncManager.fetchAllHistoricalData()
+            }
+        } onCancel: {
+            let cb = syncCompletionCallback
+            syncCompletionCallback = nil
+            cb?()
+        }
+
+        isSyncing = false
+    }
+
     func fetchAllHistoricalData(completion: @escaping () -> Void) {
-        syncCompletionCallback = completion
-        syncManager.fetchAllHistoricalData()
+        // Delegate to the serial async path to avoid parallel sync chains.
+        Task { @MainActor in
+            await fetchAllHistoricalDataAsync()
+            completion()
+        }
     }
 
     func fetchHistoryHeartRate(daysAgo: Int = 0, completion: (([HeartRateSample]) -> Void)? = nil) {
         heartRateHistoryCallback = completion
-        syncManager.fetchHistoryHeartRate(daysAgo: daysAgo)
     }
 
     func fetchHistoryHRV(daysAgo: Int = 0, completion: (([HRVSample]) -> Void)? = nil) {
@@ -326,44 +408,34 @@ class RingSessionManager: NSObject {
         (storageManager.getStorageSize(), storageManager.getFileCount())
     }
 
-    // MARK: - HealthKit Manager API
+    // MARK: - Background Sync
 
-    func requestHealthKitPermissions() async throws {
-        try await healthKitManager.requestAuthorization()
-    }
-
-    func syncToHealthKit() async throws {
-        guard healthKitManager.isAuthorized() else {
-            try await requestHealthKitPermissions()
-            return
-        }
-
-        try await healthKitManager.syncAllData(
-            heartRate: heartRateSamples,
-            activity: activitySamples,
-            sleep: sleepRecords
-        )
-        try await healthKitManager.syncSpO2(spO2Samples)
-        try await healthKitManager.syncHRV(hrvSamples)
-
-        if ringModel.supportsTemperature {
-            try await healthKitManager.syncTemperature(temperatureSamples)
+    /// Register background app refresh task. Call from AppDelegate/Orbit.swift.
+    static func registerBackgroundTasks() {
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: "com.orbit.ring.sync", using: nil) { task in
+            guard let refreshTask = task as? BGAppRefreshTask else { return }
+            handleBackgroundSync(task: refreshTask)
         }
     }
 
-    func isHealthKitAuthorized() -> Bool {
-        healthKitManager.isAuthorized()
+    /// Schedule next background sync.
+    static func scheduleBackgroundSync() {
+        let request = BGAppRefreshTaskRequest(identifier: "com.orbit.ring.sync")
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60) // 15 min
+        try? BGTaskScheduler.shared.submit(request)
     }
 
-    // MARK: - Full Sync with Auto-Save
+    private static func handleBackgroundSync(task: BGAppRefreshTask) {
+        scheduleBackgroundSync() // Schedule next
 
-    func syncAllDataWithAutoSave(enableHealthKit: Bool = true) async throws {
-        await withCheckedContinuation { continuation in
-            fetchAllHistoricalData { continuation.resume() }
+        // Background sync just saves current in-memory data
+        // Full BLE sync requires foreground; this preserves data across launches
+        let manager = RingSessionManager()
+        Task {
+            try? await manager.saveDataToEncryptedStorage()
+            task.setTaskCompleted(success: true)
         }
-        try await saveDataToEncryptedStorage()
-        if enableHealthKit, isHealthKitAuthorized() {
-            try await syncToHealthKit()
-        }
+
+        task.expirationHandler = { task.setTaskCompleted(success: false) }
     }
 }

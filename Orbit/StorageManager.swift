@@ -55,7 +55,7 @@ class StorageManager {
         guard !heartRate.isEmpty || !stress.isEmpty || !spO2.isEmpty || !activity.isEmpty ||
             !hrv.isEmpty || !temperature.isEmpty || !sleep.isEmpty else { return }
 
-        try await saveAllData(
+        try await mergeAllData(
             heartRate: heartRate,
             stress: stress,
             spO2: spO2,
@@ -95,7 +95,32 @@ class StorageManager {
         }
     }
 
-    // MARK: - Save Data
+    // MARK: - Merge (Upsert) Data
+    //
+    // These methods INSERT new records and UPDATE existing ones matched by timestamp.
+    // They never wipe existing data, so records survive across launches and partial
+    // ring syncs can never clobber previously-saved history.
+
+    func mergeAllData(
+        heartRate: [HeartRateSample],
+        stress: [StressSample],
+        spO2: [SpO2Sample],
+        activity: [ActivitySample],
+        hrv: [HRVSample],
+        temperature: [TemperatureSample],
+        sleep: [SleepRecord]
+    ) async throws {
+        try await mergeHeartRate(heartRate)
+        try await mergeStress(stress)
+        try await mergeSpO2(spO2)
+        try await mergeActivity(activity)
+        try await mergeHRV(hrv)
+        try await mergeTemperature(temperature)
+        try await mergeSleep(sleep)
+        print("All data merged into encrypted Core Data storage")
+    }
+
+    /// Backward-compatible alias used by RingSessionManager.saveDataToEncryptedStorage()
     func saveAllData(
         heartRate: [HeartRateSample],
         stress: [StressSample],
@@ -105,104 +130,159 @@ class StorageManager {
         temperature: [TemperatureSample],
         sleep: [SleepRecord]
     ) async throws {
-        try await saveHeartRate(heartRate)
-        try await saveStress(stress)
-        try await saveSpO2(spO2)
-        try await saveActivity(activity)
-        try await saveHRV(hrv)
-        try await saveTemperature(temperature)
-        try await saveSleep(sleep)
-        print("All data saved to encrypted Core Data storage")
+        try await mergeAllData(
+            heartRate: heartRate,
+            stress: stress,
+            spO2: spO2,
+            activity: activity,
+            hrv: hrv,
+            temperature: temperature,
+            sleep: sleep
+        )
     }
 
-    func saveHeartRate(_ samples: [HeartRateSample]) async throws {
-        try await performSave(entityName: "HeartRateSampleEntity") { context in
-            for sample in samples {
-                _ = HeartRateSampleEntity.create(from: sample, context: context)
-            }
-        }
-        print("Saved \(samples.count) heart rate samples")
+    func mergeHeartRate(_ samples: [HeartRateSample]) async throws {
+        guard !samples.isEmpty else { return }
+        try await performUpsert(
+            entityName: "HeartRateSampleEntity",
+            timestampKey: "timestamp",
+            samples: samples,
+            timestampAccessor: { $0.timestamp },
+            updater: { entity, sample in (entity as! HeartRateSampleEntity).update(from: sample) },
+            creator: { context, sample in _ = HeartRateSampleEntity.create(from: sample, context: context) }
+        )
+        print("Merged \(samples.count) heart rate samples")
     }
 
-    func saveStress(_ samples: [StressSample]) async throws {
-        try await performSave(entityName: "StressSampleEntity") { context in
-            for sample in samples {
-                _ = StressSampleEntity.create(from: sample, context: context)
-            }
-        }
-        print("Saved \(samples.count) stress samples")
+    func mergeStress(_ samples: [StressSample]) async throws {
+        guard !samples.isEmpty else { return }
+        try await performUpsert(
+            entityName: "StressSampleEntity",
+            timestampKey: "timestamp",
+            samples: samples,
+            timestampAccessor: { $0.timestamp },
+            updater: { entity, sample in (entity as! StressSampleEntity).update(from: sample) },
+            creator: { context, sample in _ = StressSampleEntity.create(from: sample, context: context) }
+        )
+        print("Merged \(samples.count) stress samples")
     }
 
-    func saveSpO2(_ samples: [SpO2Sample]) async throws {
-        try await performSave(entityName: "SpO2SampleEntity") { context in
-            for sample in samples {
-                _ = SpO2SampleEntity.create(from: sample, context: context)
-            }
-        }
-        print("Saved \(samples.count) SpO2 samples")
+    func mergeSpO2(_ samples: [SpO2Sample]) async throws {
+        guard !samples.isEmpty else { return }
+        try await performUpsert(
+            entityName: "SpO2SampleEntity",
+            timestampKey: "timestamp",
+            samples: samples,
+            timestampAccessor: { $0.timestamp },
+            updater: { entity, sample in (entity as! SpO2SampleEntity).update(from: sample) },
+            creator: { context, sample in _ = SpO2SampleEntity.create(from: sample, context: context) }
+        )
+        print("Merged \(samples.count) SpO2 samples")
     }
 
-    func saveActivity(_ samples: [ActivitySample]) async throws {
-        try await performSave(entityName: "ActivitySampleEntity") { context in
-            for sample in samples {
-                _ = ActivitySampleEntity.create(from: sample, context: context)
-            }
-        }
-        print("Saved \(samples.count) activity samples")
+    func mergeActivity(_ samples: [ActivitySample]) async throws {
+        guard !samples.isEmpty else { return }
+        try await performUpsert(
+            entityName: "ActivitySampleEntity",
+            timestampKey: "timestamp",
+            samples: samples,
+            timestampAccessor: { $0.timestamp },
+            updater: { entity, sample in (entity as! ActivitySampleEntity).update(from: sample) },
+            creator: { context, sample in _ = ActivitySampleEntity.create(from: sample, context: context) }
+        )
+        print("Merged \(samples.count) activity samples")
     }
 
-    func saveHRV(_ samples: [HRVSample]) async throws {
-        try await performSave(entityName: "HRVSampleEntity") { context in
-            for sample in samples {
-                _ = HRVSampleEntity.create(from: sample, context: context)
-            }
-        }
-        print("Saved \(samples.count) HRV samples")
+    func mergeHRV(_ samples: [HRVSample]) async throws {
+        guard !samples.isEmpty else { return }
+        try await performUpsert(
+            entityName: "HRVSampleEntity",
+            timestampKey: "timestamp",
+            samples: samples,
+            timestampAccessor: { $0.timestamp },
+            updater: { entity, sample in (entity as! HRVSampleEntity).update(from: sample) },
+            creator: { context, sample in _ = HRVSampleEntity.create(from: sample, context: context) }
+        )
+        print("Merged \(samples.count) HRV samples")
     }
 
-    func saveTemperature(_ samples: [TemperatureSample]) async throws {
-        try await performSave(entityName: "TemperatureSampleEntity") { context in
-            for sample in samples {
-                _ = TemperatureSampleEntity.create(from: sample, context: context)
-            }
-        }
-        print("Saved \(samples.count) temperature samples")
+    func mergeTemperature(_ samples: [TemperatureSample]) async throws {
+        guard !samples.isEmpty else { return }
+        try await performUpsert(
+            entityName: "TemperatureSampleEntity",
+            timestampKey: "timestamp",
+            samples: samples,
+            timestampAccessor: { $0.timestamp },
+            updater: { entity, sample in (entity as! TemperatureSampleEntity).update(from: sample) },
+            creator: { context, sample in _ = TemperatureSampleEntity.create(from: sample, context: context) }
+        )
+        print("Merged \(samples.count) temperature samples")
     }
 
-    func saveSleep(_ records: [SleepRecord]) async throws {
-        try await performSave(entityName: "SleepRecordEntity") { context in
-            for record in records {
-                _ = SleepRecordEntity.create(from: record, context: context)
-            }
-        }
-        print("Saved \(records.count) sleep records")
+    func mergeSleep(_ records: [SleepRecord]) async throws {
+        guard !records.isEmpty else { return }
+        // Sleep records are keyed by startTime
+        try await performUpsert(
+            entityName: "SleepRecordEntity",
+            timestampKey: "startTime",
+            samples: records,
+            timestampAccessor: { $0.startTime },
+            updater: { entity, record in (entity as! SleepRecordEntity).update(from: record) },
+            creator: { context, record in _ = SleepRecordEntity.create(from: record, context: context) }
+        )
+        print("Merged \(records.count) sleep records")
     }
 
-    // MARK: - Core Save Helper
+    // MARK: - Generic Upsert Helper
+    //
+    // Fetches entities whose timestamp falls in the incoming batch's date range,
+    // updates any that match by exact timestamp, inserts the rest as new rows.
+    // Existing records outside the incoming date range are never touched.
 
-    private func performSave(
+    private func performUpsert<Sample>(
         entityName: String,
-        insertions: @escaping (NSManagedObjectContext) throws -> Void
+        timestampKey: String,
+        samples: [Sample],
+        timestampAccessor: @escaping (Sample) -> Date,
+        updater: @escaping (NSManagedObject, Sample) -> Void,
+        creator: @escaping (NSManagedObjectContext, Sample) -> Void
     ) async throws {
+        guard !samples.isEmpty else { return }
+
         let context = coreDataStack.newBackgroundContext()
 
         try await context.perform {
-            let fetchRequest = NSFetchRequest<NSFetchRequestResult>(entityName: entityName)
-            let batchDelete = NSBatchDeleteRequest(fetchRequest: fetchRequest)
-            batchDelete.resultType = .resultTypeObjectIDs
+            let timestamps = samples.map { timestampAccessor($0) }
+            let minDate = timestamps.min()!
+            let maxDate = timestamps.max()!
 
-            let result = try context.execute(batchDelete) as? NSBatchDeleteResult
+            // Fetch only the rows that overlap with the incoming data's window.
+            let fetchRequest = NSFetchRequest<NSManagedObject>(entityName: entityName)
+            fetchRequest.predicate = NSPredicate(
+                format: "%K >= %@ AND %K <= %@",
+                timestampKey, minDate as NSDate,
+                timestampKey, maxDate as NSDate
+            )
 
-            if let objectIDs = result?.result as? [NSManagedObjectID] {
-                let changes = [NSDeletedObjectsKey: objectIDs]
-                NSManagedObjectContext.mergeChanges(
-                    fromRemoteContextSave: changes,
-                    into: [self.coreDataStack.viewContext]
-                )
+            let existing = try context.fetch(fetchRequest)
+
+            // Build an O(1) lookup by timestamp.
+            var existingByTimestamp: [Date: NSManagedObject] = [:]
+            for entity in existing {
+                if let date = entity.value(forKey: timestampKey) as? Date {
+                    existingByTimestamp[date] = entity
+                }
             }
 
-            // Insert the new records
-            try insertions(context)
+            // Upsert each incoming sample.
+            for sample in samples {
+                let ts = timestampAccessor(sample)
+                if let existingEntity = existingByTimestamp[ts] {
+                    updater(existingEntity, sample)
+                } else {
+                    creator(context, sample)
+                }
+            }
 
             if context.hasChanges {
                 try context.save()
@@ -283,6 +363,7 @@ class StorageManager {
     }
 
     // MARK: - Generic Load Helper
+
     private func loadEntities<Entity: NSManagedObject, Model>(
         fetchRequest: NSFetchRequest<Entity>,
         sortKey: String,

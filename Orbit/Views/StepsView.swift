@@ -2,8 +2,6 @@
 //  StepsView.swift
 //  Orbit
 //
-//  Created by Daniele Rolli on 1/29/26.
-//
 
 import Charts
 import SwiftUI
@@ -12,12 +10,14 @@ struct StepsView: View {
     @Environment(RingSessionManager.self) var ring
     @State private var selectedRange: TimeRange = .week
     @State private var showGoalSettings = false
-    @State private var isRefreshing = false
+    @State private var isLoading = false
+    @State private var historicalSamples: [ActivitySample] = []
 
-    // Goals
+    // Goals — distance stored as km (Double)
     @AppStorage("stepsGoal") private var stepsGoal: Int = 10000
     @AppStorage("caloriesGoal") private var caloriesGoal: Int = 500
-    @AppStorage("distanceGoal") private var distanceGoal: Int = 8000 // meters
+    @AppStorage("distanceGoalKm") private var distanceGoalKm: Double = 8.0
+    @AppStorage("userMeasurementSystem") private var measurementSystem: Int = 0
 
     enum TimeRange: String, CaseIterable {
         case week = "Week"
@@ -36,7 +36,7 @@ struct StepsView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
-                liveActivityCard
+                latestActivityCard
                 activityRingsCard
                 dailyStatsGrid
                 activityTrendsCard
@@ -48,77 +48,97 @@ struct StepsView: View {
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    showGoalSettings = true
-                } label: {
-                    Image(systemName: "target")
-                }
+                Button { showGoalSettings = true } label: { Image(systemName: "target") }
             }
         }
         .sheet(isPresented: $showGoalSettings) {
-            GoalSettingsView(
-                stepsGoal: $stepsGoal,
-                caloriesGoal: $caloriesGoal,
-                distanceGoal: $distanceGoal
-            )
+            NavigationStack {
+                GoalSettingsView(
+                    stepsGoal: $stepsGoal,
+                    caloriesGoal: $caloriesGoal,
+                    distanceGoalKm: $distanceGoalKm
+                )
+            }
         }
-        .refreshable {
-            await refreshActivityData()
+        .refreshable { await loadFromStorage() }
+        .task { await loadFromStorage() }
+        .overlay {
+            if isLoading {
+                ProgressView("Loading history…")
+                    .padding()
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            }
         }
     }
 
-    private func refreshActivityData() async {
-        isRefreshing = true
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
-        isRefreshing = false
+    // MARK: - Data Loading
+
+    private func loadFromStorage() async {
+        isLoading = true
+        historicalSamples = (try? await ring.storageManager.loadActivity()) ?? []
+        isLoading = false
     }
+
+    // MARK: - Daily Aggregation
+
+    /// Most recent calendar day that has data
+    private var mostRecentDay: Date? {
+        guard let last = historicalSamples.last else { return nil }
+        return Calendar.current.startOfDay(for: last.timestamp)
+    }
+
+    private var mostRecentDaySamples: [ActivitySample] {
+        guard let day = mostRecentDay else { return [] }
+        return historicalSamples.filter {
+            Calendar.current.startOfDay(for: $0.timestamp) == day
+        }
+    }
+
+    // Always use historical sync data — it is the authoritative source.
+    // The live 0x73/0x12 push is cumulative since ring boot, not necessarily since midnight,
+    // so preferring it over synced history caused phantom resets around 4 PM.
+    private var todaySteps: Int {
+        mostRecentDaySamples.reduce(0) { $0 + $1.steps }
+    }
+    private var todayCalories: Int {
+        mostRecentDaySamples.reduce(0) { $0 + $1.calories }
+    }
+
+    private var todayDistanceMeters: Int {
+        mostRecentDaySamples.reduce(0) { $0 + $1.distance }
+    }
+    private var todayDistanceKm: Double { Double(todayDistanceMeters) / 1000.0 }
 }
 
-// MARK: - Live Activity Card
+// MARK: - Latest Activity Card
 
 extension StepsView {
-    private var liveActivityCard: some View {
+    private var latestActivityCard: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text("TODAY")
-                    .font(.caption)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.secondary)
-
+                Text("LATEST SYNC")
+                    .font(.caption).fontWeight(.semibold).foregroundStyle(.secondary)
                 Spacer()
-
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(.green)
-                        .frame(width: 8, height: 8)
-                    Text("Live")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                if let day = mostRecentDay {
+                    HStack(spacing: 4) {
+                        Image(systemName: "clock").font(.caption2)
+                        if Calendar.current.isDateInToday(day) {
+                            Text("Today")
+                        } else if Calendar.current.isDateInYesterday(day) {
+                            Text("Yesterday")
+                        } else {
+                            Text(day.formatted(.dateTime.weekday(.wide).month(.abbreviated).day()))
+                        }
+                    }
+                    .foregroundStyle(.secondary).font(.caption)
                 }
             }
 
             HStack(spacing: 24) {
                 VStack(alignment: .leading, spacing: 12) {
-                    activityMetric(
-                        icon: "figure.walk",
-                        value: "\(ring.liveActivity.steps)",
-                        label: "Steps",
-                        color: .green
-                    )
-
-                    activityMetric(
-                        icon: "flame.fill",
-                        value: "\(ring.liveActivity.calories)",
-                        label: "Calories",
-                        color: .red
-                    )
-
-                    activityMetric(
-                        icon: "location.fill",
-                        value: formatDistance(ring.liveActivity.distance),
-                        label: "Distance",
-                        color: .cyan
-                    )
+                    activityMetric(icon: "figure.walk", value: todaySteps.formatted(), label: "Steps", color: .green)
+                    activityMetric(icon: "flame.fill", value: "\(todayCalories) Cal", label: "Calories", color: .red)
+                    activityMetric(icon: "location.fill", value: formattedDistance(todayDistanceKm), label: "Distance", color: .cyan)
                 }
 
                 Spacer()
@@ -136,29 +156,22 @@ extension StepsView {
                 )
                 .frame(width: 120, height: 120)
             }
+
+            if historicalSamples.isEmpty {
+                Text("No recorded data — sync your ring to populate history")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
         .padding(20)
-        .background(
-            RoundedRectangle(cornerRadius: 20)
-                .fill(.ultraThinMaterial)
-        )
+        .background(RoundedRectangle(cornerRadius: 20).fill(.ultraThinMaterial))
     }
 
     private func activityMetric(icon: String, value: String, label: String, color: Color) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: icon)
-                .font(.title3)
-                .foregroundStyle(color)
-                .frame(width: 24)
-
+            Image(systemName: icon).font(.title3).foregroundStyle(color).frame(width: 24)
             VStack(alignment: .leading, spacing: 2) {
-                Text(value)
-                    .font(.title3)
-                    .fontWeight(.semibold)
-
-                Text(label)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Text(value).font(.title3).fontWeight(.semibold)
+                Text(label).font(.caption).foregroundStyle(.secondary)
             }
         }
     }
@@ -170,93 +183,62 @@ extension StepsView {
     private var activityRingsCard: some View {
         VStack(spacing: 16) {
             HStack(spacing: 12) {
-                ringProgressIndicator(
-                    title: "STEPS",
-                    current: ring.liveActivity.steps,
-                    goal: stepsGoal,
-                    color: .green,
-                    icon: "figure.walk"
-                )
-
-                ringProgressIndicator(
-                    title: "CALORIES",
-                    current: ring.liveActivity.calories,
-                    goal: caloriesGoal,
-                    color: .red,
-                    icon: "flame.fill"
-                )
+                progressCard(title: "STEPS", current: todaySteps, goal: stepsGoal, color: .green, icon: "figure.walk",
+                             currentLabel: todaySteps.formatted(), goalLabel: "\(stepsGoal.formatted())")
+                progressCard(title: "CALORIES", current: todayCalories, goal: caloriesGoal, color: .red, icon: "flame.fill",
+                             currentLabel: "\(todayCalories) Cal", goalLabel: "\(caloriesGoal) Cal")
             }
 
-            ringProgressIndicator(
-                title: "DISTANCE",
-                current: ring.liveActivity.distance,
-                goal: distanceGoal,
-                color: .cyan,
-                icon: "location.fill",
-                unit: formatDistance(ring.liveActivity.distance),
-                goalUnit: formatDistance(distanceGoal)
-            )
+            // Distance — display & goal in km
+            VStack(spacing: 8) {
+                HStack {
+                    Image(systemName: "location.fill").font(.caption).foregroundStyle(.cyan)
+                    Text("DISTANCE").font(.caption).fontWeight(.semibold).foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(Int(distanceProgress * 100))%").font(.caption).fontWeight(.semibold).foregroundStyle(.cyan)
+                }
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 4).fill(Color.cyan.opacity(0.2)).frame(height: 8)
+                    GeometryReader { geo in
+                        RoundedRectangle(cornerRadius: 4).fill(Color.cyan)
+                            .frame(width: geo.size.width * CGFloat(distanceProgress), height: 8)
+                    }.frame(height: 8)
+                }
+                HStack {
+                    Text(formattedDistance(todayDistanceKm)).font(.subheadline).fontWeight(.semibold)
+                    Spacer()
+                    Text("of \(formattedDistance(distanceGoalKm))").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 12).fill(Color.cyan.opacity(0.15)))
         }
     }
 
-    private func ringProgressIndicator(
-        title: String,
-        current: Int,
-        goal: Int,
-        color: Color,
-        icon: String,
-        unit: String? = nil,
-        goalUnit: String? = nil
-    ) -> some View {
-        VStack(spacing: 8) {
+    private func progressCard(title: String, current: Int, goal: Int, color: Color, icon: String, currentLabel: String, goalLabel: String) -> some View {
+        let prog = min(1.0, Double(current) / Double(max(1, goal)))
+        return VStack(spacing: 8) {
             HStack {
-                Image(systemName: icon)
-                    .font(.caption)
-                    .foregroundStyle(color)
-
-                Text(title)
-                    .font(.caption)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.secondary)
-
+                Image(systemName: icon).font(.caption).foregroundStyle(color)
+                Text(title).font(.caption).fontWeight(.semibold).foregroundStyle(.secondary)
                 Spacer()
-
-                Text("\(Int(progress(current: current, goal: goal) * 100))%")
-                    .font(.caption)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(color)
+                Text("\(Int(prog * 100))%").font(.caption).fontWeight(.semibold).foregroundStyle(color)
             }
-
             ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(color.opacity(0.2))
-                    .frame(height: 8)
-
-                GeometryReader { geometry in
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(color)
-                        .frame(width: geometry.size.width * progress(current: current, goal: goal), height: 8)
-                }
-                .frame(height: 8)
+                RoundedRectangle(cornerRadius: 4).fill(color.opacity(0.2)).frame(height: 8)
+                GeometryReader { geo in
+                    RoundedRectangle(cornerRadius: 4).fill(color)
+                        .frame(width: geo.size.width * CGFloat(prog), height: 8)
+                }.frame(height: 8)
             }
-
             HStack {
-                Text(unit ?? "\(current)")
-                    .font(.subheadline)
-                    .fontWeight(.semibold)
-
+                Text(currentLabel).font(.subheadline).fontWeight(.semibold)
                 Spacer()
-
-                Text("of \(goalUnit ?? "\(goal)")")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Text("of \(goalLabel)").font(.caption).foregroundStyle(.secondary)
             }
         }
         .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(color.opacity(0.15))
-        )
+        .background(RoundedRectangle(cornerRadius: 12).fill(color.opacity(0.15)))
     }
 }
 
@@ -265,69 +247,27 @@ extension StepsView {
 extension StepsView {
     private var dailyStatsGrid: some View {
         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-            statCard(
-                title: "AVG STEPS",
-                value: "\(averageSteps)",
-                subtitle: "per day",
-                icon: "figure.walk",
-                color: .green
-            )
-
-            statCard(
-                title: "BEST DAY",
-                value: "\(bestDaySteps)",
-                subtitle: "steps",
-                icon: "trophy.fill",
-                color: .yellow
-            )
-
-            statCard(
-                title: "ACTIVE DAYS",
-                value: "\(activeDaysCount)",
-                subtitle: "this \(selectedRange.rawValue.lowercased())",
-                icon: "calendar.badge.checkmark",
-                color: .blue
-            )
-
-            statCard(
-                title: "STREAK",
-                value: "\(currentStreak)",
-                subtitle: "days",
-                icon: "flame.fill",
-                color: .orange
-            )
+            statCard(title: "AVG STEPS", value: "\(averageSteps.formatted())", subtitle: "per day", icon: "figure.walk", color: .green)
+            statCard(title: "BEST DAY", value: "\(bestDaySteps.formatted())", subtitle: "steps", icon: "trophy.fill", color: .yellow)
+            statCard(title: "ACTIVE DAYS", value: "\(activeDaysCount)", subtitle: "this \(selectedRange.rawValue.lowercased())", icon: "calendar.badge.checkmark", color: .blue)
+            statCard(title: "STREAK", value: "\(currentStreak)", subtitle: "days", icon: "flame.fill", color: .orange)
         }
     }
 
     private func statCard(title: String, value: String, subtitle: String, icon: String, color: Color) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text(title)
-                    .font(.caption)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.secondary)
-
+                Text(title).font(.caption).fontWeight(.semibold).foregroundStyle(.secondary)
                 Spacer()
-
-                Image(systemName: icon)
-                    .font(.title3)
-                    .foregroundStyle(color)
+                Image(systemName: icon).font(.title3).foregroundStyle(color)
             }
-
             VStack(alignment: .leading, spacing: 2) {
-                Text(value)
-                    .font(.system(size: 28, weight: .semibold, design: .rounded))
-
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Text(value).font(.system(size: 28, weight: .semibold, design: .rounded))
+                Text(subtitle).font(.caption).foregroundStyle(.secondary)
             }
         }
         .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(.ultraThinMaterial)
-        )
+        .background(RoundedRectangle(cornerRadius: 16).fill(.ultraThinMaterial))
     }
 }
 
@@ -337,81 +277,46 @@ extension StepsView {
     private var activityTrendsCard: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text("Activity Trends")
-                    .font(.title3)
-                    .fontWeight(.semibold)
-
+                Text("Activity Trends").font(.title3).fontWeight(.semibold)
                 Spacer()
-
                 Picker("Range", selection: $selectedRange.animation(.easeInOut)) {
-                    ForEach(TimeRange.allCases, id: \.self) {
-                        Text($0.rawValue).tag($0)
-                    }
+                    ForEach(TimeRange.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }
-                .pickerStyle(.segmented)
-                .frame(width: 180)
+                .pickerStyle(.segmented).frame(width: 180)
             }
 
-            if filteredSamples.isEmpty {
+            if dailyAggregateSamples.isEmpty {
                 emptyTrendsView
             } else {
-                activityChart
+                Chart {
+                    ForEach(dailyAggregateSamples, id: \.date) { day in
+                        BarMark(x: .value("Date", day.date), y: .value("Steps", day.steps))
+                            .foregroundStyle(.green.gradient).cornerRadius(4)
+                    }
+                    RuleMark(y: .value("Goal", stepsGoal))
+                        .foregroundStyle(.green.opacity(0.5))
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [5, 5]))
+                        .annotation(position: .top, alignment: .trailing) {
+                            Text("Goal").font(.caption2).foregroundStyle(.green.opacity(0.7))
+                        }
+                }
+                .chartXAxis {
+                    AxisMarks(values: .stride(by: xAxisStride)) { AxisGridLine(); AxisValueLabel(format: xAxisFormat) }
+                }
+                .frame(height: 200)
             }
         }
         .padding(20)
-        .background(
-            RoundedRectangle(cornerRadius: 20)
-                .fill(.ultraThinMaterial)
-        )
-    }
-
-    private var activityChart: some View {
-        Chart {
-            ForEach(filteredSamples, id: \.timestamp) { sample in
-                BarMark(
-                    x: .value("Date", sample.timestamp),
-                    y: .value("Steps", sample.steps)
-                )
-                .foregroundStyle(.green.gradient)
-                .cornerRadius(4)
-            }
-
-            // Goal line
-            RuleMark(y: .value("Goal", stepsGoal))
-                .foregroundStyle(.green.opacity(0.5))
-                .lineStyle(StrokeStyle(lineWidth: 1, dash: [5, 5]))
-        }
-        .chartXAxis {
-            AxisMarks(values: .stride(by: xAxisStride)) {
-                AxisGridLine()
-                AxisValueLabel(format: xAxisFormat)
-            }
-        }
-        .chartYAxis {
-            AxisMarks(position: .leading) {
-                AxisGridLine()
-                AxisValueLabel()
-            }
-        }
-        .frame(height: 200)
+        .background(RoundedRectangle(cornerRadius: 20).fill(.ultraThinMaterial))
     }
 
     private var emptyTrendsView: some View {
         VStack(spacing: 12) {
-            Image(systemName: "chart.bar")
-                .font(.system(size: 48))
-                .foregroundStyle(.secondary.opacity(0.5))
-
-            Text("No Activity Data")
-                .font(.headline)
-                .foregroundStyle(.secondary)
-
-            Text("Pull down to refresh")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            Image(systemName: "chart.bar").font(.system(size: 48)).foregroundStyle(.secondary.opacity(0.5))
+            Text("No Activity Data").font(.headline).foregroundStyle(.secondary)
+            Text("Pull down to reload from storage").font(.caption).foregroundStyle(.secondary)
         }
-        .frame(height: 200)
-        .frame(maxWidth: .infinity)
+        .frame(height: 200).frame(maxWidth: .infinity)
     }
 }
 
@@ -420,85 +325,33 @@ extension StepsView {
 extension StepsView {
     private var achievementsCard: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Recent Achievements")
-                .font(.headline)
-
+            Text("Recent Achievements").font(.headline)
             VStack(spacing: 12) {
                 if allGoalsAchievedToday {
-                    achievementRow(
-                        icon: "star.fill",
-                        title: "All Goals Completed!",
-                        description: "You hit all your targets today",
-                        color: .yellow,
-                        isUnlocked: true
-                    )
+                    achievementRow(icon: "star.fill", title: "All Goals Completed!", description: "You hit all your targets on the latest sync", color: .yellow, isUnlocked: true)
                 }
-
-                achievementRow(
-                    icon: "flame.fill",
-                    title: "\(currentStreak) Day Streak",
-                    description: "Keep it up!",
-                    color: .orange,
-                    isUnlocked: currentStreak >= 3
-                )
-
-                achievementRow(
-                    icon: "figure.walk",
-                    title: "10K Steps",
-                    description: "Walk 10,000 steps in a day",
-                    color: .green,
-                    isUnlocked: ring.liveActivity.steps >= 10000
-                )
-
-                achievementRow(
-                    icon: "trophy.fill",
-                    title: "Week Warrior",
-                    description: "Hit your goal 7 days in a row",
-                    color: .blue,
-                    isUnlocked: currentStreak >= 7
-                )
+                achievementRow(icon: "flame.fill", title: "\(currentStreak) Day Streak", description: "Keep it up!", color: .orange, isUnlocked: currentStreak >= 3)
+                achievementRow(icon: "figure.walk", title: "10K Steps", description: "Walk 10,000 steps in a day", color: .green, isUnlocked: todaySteps >= 10000)
+                achievementRow(icon: "trophy.fill", title: "Week Warrior", description: "Hit your goal 7 days in a row", color: .blue, isUnlocked: currentStreak >= 7)
             }
         }
         .padding(20)
-        .background(
-            RoundedRectangle(cornerRadius: 20)
-                .fill(.ultraThinMaterial)
-        )
+        .background(RoundedRectangle(cornerRadius: 20).fill(.ultraThinMaterial))
     }
 
     private func achievementRow(icon: String, title: String, description: String, color: Color, isUnlocked: Bool) -> some View {
         HStack(spacing: 12) {
             ZStack {
-                Circle()
-                    .fill(isUnlocked ? color.opacity(0.2) : Color.gray.opacity(0.1))
-                    .frame(width: 44, height: 44)
-
-                Image(systemName: icon)
-                    .font(.title3)
-                    .foregroundStyle(isUnlocked ? color : .gray)
+                Circle().fill(isUnlocked ? color.opacity(0.2) : Color.gray.opacity(0.1)).frame(width: 44, height: 44)
+                Image(systemName: icon).font(.title3).foregroundStyle(isUnlocked ? color : .gray)
             }
-
             VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.subheadline)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(isUnlocked ? .primary : .secondary)
-
-                Text(description)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Text(title).font(.subheadline).fontWeight(.semibold).foregroundStyle(isUnlocked ? .primary : .secondary)
+                Text(description).font(.caption).foregroundStyle(.secondary)
             }
-
             Spacer()
-
-            if isUnlocked {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-            } else {
-                Image(systemName: "lock.fill")
-                    .font(.caption)
-                    .foregroundStyle(.gray)
-            }
+            Image(systemName: isUnlocked ? "checkmark.circle.fill" : "lock.fill")
+                .foregroundStyle(isUnlocked ? .green : .gray).font(isUnlocked ? .body : .caption)
         }
         .padding(.vertical, 4)
     }
@@ -507,204 +360,70 @@ extension StepsView {
 // MARK: - Helper Methods
 
 extension StepsView {
-    private var stepsProgress: Double {
-        progress(current: ring.liveActivity.steps, goal: stepsGoal)
-    }
+    private var stepsProgress: Double { min(1.0, Double(todaySteps) / Double(max(1, stepsGoal))) }
+    private var caloriesProgress: Double { min(1.0, Double(todayCalories) / Double(max(1, caloriesGoal))) }
+    private var distanceProgress: Double { min(1.0, todayDistanceKm / max(0.001, distanceGoalKm)) }
 
-    private var caloriesProgress: Double {
-        progress(current: ring.liveActivity.calories, goal: caloriesGoal)
-    }
+    // Per-day aggregated samples for the chart (group 15-min slots into daily totals)
+    private var dailyAggregateSamples: [(date: Date, steps: Int)] {
+        let cal = Calendar.current
+        let now = Date()
+        let cutoff = now.addingTimeInterval(-Double(selectedRange.days) * 86400)
+        let filtered = historicalSamples.filter { $0.timestamp > cutoff }
 
-    private var distanceProgress: Double {
-        progress(current: ring.liveActivity.distance, goal: distanceGoal)
-    }
-
-    private func progress(current: Int, goal: Int) -> Double {
-        guard goal > 0 else { return 0 }
-        return min(1.0, Double(current) / Double(goal))
+        var dict: [Date: Int] = [:]
+        for s in filtered {
+            let day = cal.startOfDay(for: s.timestamp)
+            dict[day, default: 0] += s.steps
+        }
+        return dict.map { (date: $0.key, steps: $0.value) }.sorted { $0.date < $1.date }
     }
 
     private var filteredSamples: [ActivitySample] {
         let now = Date()
         let interval = Double(selectedRange.days) * 86400
-        return ring.activitySamples.filter {
-            $0.timestamp > now.addingTimeInterval(-interval)
-        }
+        return historicalSamples.filter { $0.timestamp > now.addingTimeInterval(-interval) }
     }
 
-    private var xAxisStride: Calendar.Component {
-        selectedRange == .week ? .day : .weekOfYear
-    }
-
-    private var xAxisFormat: Date.FormatStyle {
-        selectedRange == .week ? .dateTime.weekday(.abbreviated) : .dateTime.month(.abbreviated).day()
-    }
+    private var xAxisStride: Calendar.Component { selectedRange == .week ? .day : .weekOfYear }
+    private var xAxisFormat: Date.FormatStyle { selectedRange == .week ? .dateTime.weekday(.abbreviated) : .dateTime.month(.abbreviated).day() }
 
     private var averageSteps: Int {
-        guard !filteredSamples.isEmpty else { return 0 }
-        return filteredSamples.map(\.steps).reduce(0, +) / filteredSamples.count
+        guard !dailyAggregateSamples.isEmpty else { return 0 }
+        return dailyAggregateSamples.map(\.steps).reduce(0, +) / dailyAggregateSamples.count
     }
 
-    private var bestDaySteps: Int {
-        filteredSamples.map(\.steps).max() ?? 0
-    }
+    private var bestDaySteps: Int { dailyAggregateSamples.map(\.steps).max() ?? 0 }
 
-    private var activeDaysCount: Int {
-        filteredSamples.filter { $0.steps >= stepsGoal }.count
-    }
+    private var activeDaysCount: Int { dailyAggregateSamples.filter { $0.steps >= stepsGoal }.count }
 
     private var currentStreak: Int {
         var streak = 0
-        let calendar = Calendar.current
-        var currentDate = Date()
-
-        let sortedSamples = ring.activitySamples.sorted { $0.timestamp > $1.timestamp }
-
-        for sample in sortedSamples {
-            if calendar.isDate(sample.timestamp, inSameDayAs: currentDate) {
-                if sample.steps >= stepsGoal {
-                    streak += 1
-                    currentDate = calendar.date(byAdding: .day, value: -1, to: currentDate)!
-                } else {
-                    break
-                }
+        let cal = Calendar.current
+        var date = Date()
+        for day in dailyAggregateSamples.sorted(by: { $0.date > $1.date }) {
+            if cal.isDate(day.date, inSameDayAs: date) {
+                if day.steps >= stepsGoal { streak += 1; date = cal.date(byAdding: .day, value: -1, to: date)! }
+                else { break }
             }
         }
-
         return streak
     }
 
     private var allGoalsAchievedToday: Bool {
-        ring.liveActivity.steps >= stepsGoal &&
-            ring.liveActivity.calories >= caloriesGoal &&
-            ring.liveActivity.distance >= distanceGoal
+        todaySteps >= stepsGoal && todayCalories >= caloriesGoal && todayDistanceKm >= distanceGoalKm
     }
 
-    private func formatDistance(_ meters: Int) -> String {
-        let km = Double(meters) / 1000.0
-        return String(format: "%.1f km", km)
-    }
-}
-
-// MARK: - Goal Settings View
-
-struct GoalSettingsView: View {
-    @Environment(\.dismiss) var dismiss
-    @Binding var stepsGoal: Int
-    @Binding var caloriesGoal: Int
-    @Binding var distanceGoal: Int
-
-    @State private var localStepsGoal: Double
-    @State private var localCaloriesGoal: Double
-    @State private var localDistanceGoal: Double
-
-    init(stepsGoal: Binding<Int>, caloriesGoal: Binding<Int>, distanceGoal: Binding<Int>) {
-        _stepsGoal = stepsGoal
-        _caloriesGoal = caloriesGoal
-        _distanceGoal = distanceGoal
-        _localStepsGoal = State(initialValue: Double(stepsGoal.wrappedValue))
-        _localCaloriesGoal = State(initialValue: Double(caloriesGoal.wrappedValue))
-        _localDistanceGoal = State(initialValue: Double(distanceGoal.wrappedValue) / 1000.0)
-    }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Image(systemName: "figure.walk")
-                                .foregroundStyle(.green)
-                            Text("Steps Goal")
-                            Spacer()
-                            Text("\(Int(localStepsGoal))")
-                                .foregroundStyle(.secondary)
-                        }
-
-                        Slider(value: $localStepsGoal, in: 1000 ... 30000, step: 500)
-                            .tint(.green)
-                    }
-                } header: {
-                    Text("Steps")
-                } footer: {
-                    Text("Recommended: 10,000 steps per day")
-                }
-
-                Section {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Image(systemName: "flame.fill")
-                                .foregroundStyle(.red)
-                            Text("Calories Goal")
-                            Spacer()
-                            Text("\(Int(localCaloriesGoal))")
-                                .foregroundStyle(.secondary)
-                        }
-
-                        Slider(value: $localCaloriesGoal, in: 100 ... 2000, step: 50)
-                            .tint(.red)
-                    }
-                } header: {
-                    Text("Calories")
-                } footer: {
-                    Text("Active calories burned through movement")
-                }
-
-                Section {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Image(systemName: "location.fill")
-                                .foregroundStyle(.cyan)
-                            Text("Distance Goal")
-                            Spacer()
-                            Text(String(format: "%.1f km", localDistanceGoal))
-                                .foregroundStyle(.secondary)
-                        }
-
-                        Slider(value: $localDistanceGoal, in: 1 ... 20, step: 0.5)
-                            .tint(.cyan)
-                    }
-                } header: {
-                    Text("Distance")
-                } footer: {
-                    Text("Total distance walked or run")
-                }
-
-                Section {
-                    Button("Reset to Defaults") {
-                        localStepsGoal = 10000
-                        localCaloriesGoal = 500
-                        localDistanceGoal = 8
-                    }
-                    .foregroundStyle(.red)
-                }
-            }
-            .navigationTitle("Activity Goals")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        dismiss()
-                    }
-                }
-
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        stepsGoal = Int(localStepsGoal)
-                        caloriesGoal = Int(localCaloriesGoal)
-                        distanceGoal = Int(localDistanceGoal * 1000)
-                        dismiss()
-                    }
-                    .fontWeight(.semibold)
-                }
-            }
+    /// Format distance respecting the user's measurement system preference
+    private func formattedDistance(_ km: Double) -> String {
+        if measurementSystem == 0 {
+            return String(format: "%.1f km", km)
+        } else {
+            return String(format: "%.1f mi", km * 0.621371)
         }
     }
 }
 
 #Preview {
-    NavigationStack {
-        StepsView()
-            .environment(RingSessionManager())
-    }
+    NavigationStack { StepsView().environment(RingSessionManager()) }
 }

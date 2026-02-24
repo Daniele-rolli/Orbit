@@ -5,7 +5,7 @@
 //
 
 import AccessorySetupKit
-import SleepChartKit
+import Charts
 import SwiftUI
 
 // MARK: - Widget Types
@@ -15,6 +15,7 @@ enum WidgetType: String, CaseIterable, Identifiable, Codable {
     case spo2 = "Blood Oxygen"
     case sleep = "Sleep"
     case steps = "Steps"
+    case stress = "Stress"
 
     var id: String {
         rawValue
@@ -26,6 +27,7 @@ enum WidgetType: String, CaseIterable, Identifiable, Codable {
         case .spo2: return "lungs.fill"
         case .sleep: return "bed.double.fill"
         case .steps: return "figure.walk"
+        case .stress: return "brain.head.profile"
         }
     }
 
@@ -35,6 +37,7 @@ enum WidgetType: String, CaseIterable, Identifiable, Codable {
         case .spo2: return .cyan
         case .sleep: return .blue
         case .steps: return .green
+        case .stress: return .purple
         }
     }
 }
@@ -66,6 +69,7 @@ struct ContentView: View {
         WidgetItem(type: .spo2, order: 1),
         WidgetItem(type: .sleep, order: 2),
         WidgetItem(type: .steps, order: 3),
+        WidgetItem(type: .stress, order: 4)
     ]
 
     @State private var showingReorderSheet = false
@@ -92,7 +96,6 @@ struct ContentView: View {
                 ringSessionManager.requestBatteryInfo { info in
                     batteryInfo = info
                 }
-                ringSessionManager.startRealtimeSteps()
             }
         }
         .sheet(isPresented: $showingReorderSheet) {
@@ -109,15 +112,31 @@ struct ContentView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
+                    // Sync progress banner — shown while the BLE sync chain is running
+                    if ringSessionManager.isSyncing {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .scaleEffect(0.85)
+                            Text("Syncing ring data…")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.top, 12)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
                     VStack(spacing: 16) {
                         ForEach(widgets) { widget in
                             widgetCard(for: widget)
                         }
                     }
                     .padding(.horizontal, 20)
-                    .padding(.top, 16)
+                    .padding(.top, ringSessionManager.isSyncing ? 8 : 16)
                     .padding(.bottom, 24)
                 }
+                .animation(.easeInOut(duration: 0.3), value: ringSessionManager.isSyncing)
             }
             .refreshable {
                 await refreshDashboard()
@@ -155,6 +174,9 @@ struct ContentView: View {
                 case .steps:
                     StepsWidget()
                         .environment(ringSessionManager)
+                case .stress:
+                    StressWidget()
+                        .environment(ringSessionManager)
                 }
             }
             .contentShape(Rectangle())
@@ -173,6 +195,8 @@ struct ContentView: View {
             SleepView()
         case .steps:
             StepsView()
+        case .stress:
+            StressView()
         }
     }
 
@@ -211,19 +235,8 @@ struct ContentView: View {
         }
 
         isRefreshing = true
-
-        await withCheckedContinuation { continuation in
-            ringSessionManager.fetchAllHistoricalData {
-                continuation.resume()
-            }
-        }
-
+        await ringSessionManager.fetchAllHistoricalDataAsync()
         try? await ringSessionManager.saveDataToEncryptedStorage()
-
-        if ringSessionManager.isHealthKitAuthorized() {
-            try? await ringSessionManager.syncToHealthKit()
-        }
-
         isRefreshing = false
     }
 }
@@ -326,17 +339,14 @@ struct DropViewDelegate: DropDelegate {
 
 struct HeartRateWidget: View {
     @Environment(RingSessionManager.self) var ringSessionManager
+    @State private var storageSamples: [HeartRateSample] = []
 
     private var latestHeartRate: Int? {
-        if let realtime = ringSessionManager.realtimeHeartRate, realtime > 0 {
-            return realtime
-        }
-        return ringSessionManager.heartRateSamples.last?.heartRate
+        storageSamples.last?.heartRate
     }
 
-    private var recentSamples: [Int] {
-        let samples = ringSessionManager.heartRateSamples.suffix(20)
-        return samples.map { $0.heartRate }
+    private var recentSamples: [HeartRateSample] {
+        Array(storageSamples.suffix(20))
     }
 
     var body: some View {
@@ -378,44 +388,54 @@ struct HeartRateWidget: View {
                 Spacer()
 
                 if !recentSamples.isEmpty {
-                    HStack(alignment: .bottom, spacing: 1.5) {
-                        ForEach(0 ..< recentSamples.count, id: \.self) { i in
-                            Capsule()
-                                .fill(Color.red.opacity(0.6))
-                                .frame(width: 2, height: heartRateHeight(for: recentSamples[i]))
-                        }
+                    Chart(recentSamples, id: \.timestamp) { s in
+                        LineMark(
+                            x: .value("Time", s.timestamp),
+                            y: .value("BPM", s.heartRate)
+                        )
+                        .foregroundStyle(.red)
+                        .interpolationMethod(.catmullRom)
                     }
-                    .frame(height: 32)
+                    .chartXAxis(.hidden)
+                    .chartYAxis(.hidden)
+                    .frame(width: 80, height: 32)
                 }
             }
         }
         .padding()
         .background(Color(.secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .task {
+            storageSamples = (try? await ringSessionManager.storageManager.loadHeartRate()) ?? []
+        }
+        .onChange(of: ringSessionManager.heartRateSamples) {
+            Task {
+                storageSamples = (try? await ringSessionManager.storageManager.loadHeartRate()) ?? []
+            }
+        }
+        .onChange(of: ringSessionManager.isSyncing) { _, syncing in
+            guard !syncing else { return }
+            Task {
+                storageSamples = (try? await ringSessionManager.storageManager.loadHeartRate()) ?? []
+            }
+        }
     }
 
-    private func heartRateHeight(for heartRate: Int) -> CGFloat {
-        let normalized = max(0, min(1, Double(heartRate - 40) / 80.0))
-        return CGFloat(8 + normalized * 24)
-    }
+
 }
 
 struct SPO2Widget: View {
     @Environment(RingSessionManager.self) var ringSessionManager
+    @State private var storageSamples: [SpO2Sample] = []
 
     private var latestSpO2: Int? {
-        // Check realtime first
-        if let realtime = ringSessionManager.realtimeSpO2, realtime > 0 {
-            return realtime
-        }
-        // Fall back to latest sample
-        return ringSessionManager.spO2Samples.last?.spO2
+        storageSamples.last?.spO2
     }
 
     private var averageSpO2: Double? {
-        guard !ringSessionManager.spO2Samples.isEmpty else { return nil }
-        let sum = ringSessionManager.spO2Samples.reduce(0) { $0 + $1.spO2 }
-        return Double(sum) / Double(ringSessionManager.spO2Samples.count)
+        guard !storageSamples.isEmpty else { return nil }
+        let sum = storageSamples.reduce(0) { $0 + $1.spO2 }
+        return Double(sum) / Double(storageSamples.count)
     }
 
     var body: some View {
@@ -476,43 +496,57 @@ struct SPO2Widget: View {
         .padding()
         .background(Color(.secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .task {
+            storageSamples = (try? await ringSessionManager.storageManager.loadSpO2()) ?? []
+        }
+        .onChange(of: ringSessionManager.spO2Samples) {
+            Task {
+                storageSamples = (try? await ringSessionManager.storageManager.loadSpO2()) ?? []
+            }
+        }
+        .onChange(of: ringSessionManager.isSyncing) { _, syncing in
+            guard !syncing else { return }
+            Task {
+                storageSamples = (try? await ringSessionManager.storageManager.loadSpO2()) ?? []
+            }
+        }
     }
 }
 
 struct SleepWidget: View {
     @Environment(RingSessionManager.self) var ringSessionManager
+    @State private var storageSleepRecords: [SleepRecord] = []
 
-    private var sleepSamples: [SleepSample] {
-        ringSessionManager.sleepRecords.map { record in
-            let stage: SleepStage = switch record.sleepType {
-            case .deep: .asleepDeep
-            case .light: .asleepCore
-            case .rem: .asleepREM
-            case .awake: .awake
+    // Most recent sleep session records only
+    private var recentRecords: [SleepRecord] {
+        // Group by session (records within 3h of each other form a session)
+        let sorted = storageSleepRecords.sorted { $0.startTime < $1.startTime }
+        var groups: [[SleepRecord]] = []
+        var current: [SleepRecord] = []
+        for r in sorted {
+            if current.isEmpty || r.startTime.timeIntervalSince(current.last!.endTime) <= 3 * 3600 {
+                current.append(r)
+            } else {
+                groups.append(current)
+                current = [r]
             }
-            return SleepSample(stage: stage, startDate: record.startTime, endDate: record.endTime)
         }
+        if !current.isEmpty { groups.append(current) }
+        return groups.last ?? []
     }
 
     private var totalSleepMinutes: Int {
-        sleepSamples
-            .filter { $0.stage != .awake }
-            .reduce(0) {
-                $0 + Int($1.endDate.timeIntervalSince($1.startDate) / 60)
-            }
+        recentRecords
+            .filter { $0.sleepType != .awake }
+            .reduce(0) { $0 + $1.durationMinutes }
     }
 
     private var durationText: (h: Int, m: Int) {
         (totalSleepMinutes / 60, totalSleepMinutes % 60)
     }
 
-    private var bedtime: Date? {
-        sleepSamples.map(\.startDate).min()
-    }
-
-    private var wakeTime: Date? {
-        sleepSamples.map(\.endDate).max()
-    }
+    private var bedtime: Date? { recentRecords.map(\.startTime).min() }
+    private var wakeTime: Date? { recentRecords.map(\.endTime).max() }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -558,10 +592,10 @@ struct SleepWidget: View {
 
                 // Right Side: Small Square Graph or Empty State
                 Group {
-                    if sleepSamples.isEmpty {
+                    if recentRecords.isEmpty {
                         smallEmptyStateView
                     } else {
-                        SleepTimelineGraph(samples: sleepSamples)
+                        MiniSleepChart(records: recentRecords)
                             .frame(width: 100, height: 100)
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
@@ -571,6 +605,20 @@ struct SleepWidget: View {
         .padding()
         .background(Color(.secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .task {
+            storageSleepRecords = (try? await ringSessionManager.storageManager.loadSleep()) ?? []
+        }
+        .onChange(of: ringSessionManager.sleepRecords) {
+            Task {
+                storageSleepRecords = (try? await ringSessionManager.storageManager.loadSleep()) ?? []
+            }
+        }
+        .onChange(of: ringSessionManager.isSyncing) { _, syncing in
+            guard !syncing else { return }
+            Task {
+                storageSleepRecords = (try? await ringSessionManager.storageManager.loadSleep()) ?? []
+            }
+        }
     }
 
     /// Refactored Empty State for a small square layout
@@ -592,31 +640,37 @@ struct SleepWidget: View {
 
 struct StepsWidget: View {
     @Environment(RingSessionManager.self) var ringSessionManager
+    @State private var storageSamples: [ActivitySample] = []
+
+    private var latestSample: ActivitySample? { storageSamples.last }
+
+    private var mostRecentDay: Date? {
+        guard let last = latestSample else { return nil }
+        return Calendar.current.startOfDay(for: last.timestamp)
+    }
+
+    private var todaySamples: [ActivitySample] {
+        guard let day = mostRecentDay else { return [] }
+        return storageSamples.filter {
+            Calendar.current.startOfDay(for: $0.timestamp) == day
+        }
+    }
 
     private var todaySteps: Int {
-        return ringSessionManager.liveActivity.steps
+        todaySamples.reduce(0) { $0 + $1.steps }
     }
 
     private var todayCalories: Int {
-        return ringSessionManager.liveActivity.calories
+        todaySamples.reduce(0) { $0 + $1.calories }
     }
 
     private var todayDistance: Double {
-        // Distance in kilometers
-        return Double(ringSessionManager.liveActivity.distance) / 1000.0
+        Double(todaySamples.reduce(0) { $0 + $1.distance }) / 1000.0
     }
-
-    private var stepGoal: Int {
-        return 10000
-    }
-
-    private var calorieGoal: Int {
-        return 500 // Active calories goal
-    }
-
-    private var distanceGoal: Double {
-        return 5.0 // 5 km
-    }
+    
+    @AppStorage("stepsGoal") private var stepsGoal: Int = 10000
+    @AppStorage("caloriesGoal") private var caloriesGoal: Int = 500
+    @AppStorage("distanceGoalKm") private var distanceGoalKm: Double = 8.0
 
     @State private var stepsProgress: CGFloat = 0.0
     @State private var caloriesProgress: CGFloat = 0.0
@@ -650,7 +704,7 @@ struct StepsWidget: View {
                             .frame(width: 8, height: 8)
                         Text("\(todaySteps.formatted())")
                             .font(.system(size: 14, weight: .semibold, design: .rounded))
-                        Text("/ \(stepGoal.formatted()) steps")
+                        Text("/ \(stepsGoal.formatted()) steps")
                             .font(.system(size: 12, weight: .regular, design: .rounded))
                             .foregroundStyle(.secondary)
                     }
@@ -661,7 +715,7 @@ struct StepsWidget: View {
                             .frame(width: 8, height: 8)
                         Text("\(todayCalories)")
                             .font(.system(size: 14, weight: .semibold, design: .rounded))
-                        Text("/ \(calorieGoal) cal")
+                        Text("/ \(caloriesGoal) Cal")
                             .font(.system(size: 12, weight: .regular, design: .rounded))
                             .foregroundStyle(.secondary)
                     }
@@ -672,7 +726,7 @@ struct StepsWidget: View {
                             .frame(width: 8, height: 8)
                         Text(String(format: "%.1f", todayDistance))
                             .font(.system(size: 14, weight: .semibold, design: .rounded))
-                        Text("/ \(String(format: "%.1f", distanceGoal)) km")
+                        Text("/ \(String(format: "%.1f", distanceGoalKm)) km")
                             .font(.system(size: 12, weight: .regular, design: .rounded))
                             .foregroundStyle(.secondary)
                     }
@@ -698,6 +752,23 @@ struct StepsWidget: View {
         .padding()
         .background(Color(.secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .task {
+            storageSamples = (try? await ringSessionManager.storageManager.loadActivity()) ?? []
+            updateProgress()
+        }
+        .onChange(of: ringSessionManager.activitySamples) {
+            Task {
+                storageSamples = (try? await ringSessionManager.storageManager.loadActivity()) ?? []
+                updateProgress()
+            }
+        }
+        .onChange(of: ringSessionManager.isSyncing) { _, syncing in
+            guard !syncing else { return }
+            Task {
+                storageSamples = (try? await ringSessionManager.storageManager.loadActivity()) ?? []
+                updateProgress()
+            }
+        }
         .onAppear {
             updateProgress()
         }
@@ -711,10 +782,164 @@ struct StepsWidget: View {
 
     private func updateProgress() {
         withAnimation(.spring(response: 0.6, dampingFraction: 0.7)) {
-            stepsProgress = min(1.5, CGFloat(todaySteps) / CGFloat(stepGoal))
-            caloriesProgress = min(1.5, CGFloat(todayCalories) / CGFloat(calorieGoal))
-            distanceProgress = min(1.5, CGFloat(todayDistance / distanceGoal))
+            stepsProgress = min(1.5, CGFloat(todaySteps) / CGFloat(stepsGoal))
+            caloriesProgress = min(1.5, CGFloat(todayCalories) / CGFloat(caloriesGoal))
+            distanceProgress = min(1.5, CGFloat(todayDistance / distanceGoalKm))
         }
+    }
+}
+
+struct StressWidget: View {
+    @Environment(RingSessionManager.self) var ring
+    @State private var storageSamples: [StressSample] = []
+
+    // Most recent reading
+    private var latestLevel: Int? { storageSamples.last?.stressLevel }
+
+    // Last 12 readings for the sparkline
+    private var recentSamples: [StressSample] { Array(storageSamples.suffix(12)) }
+
+    // Today's average
+    private var avgToday: Int? {
+        let today = storageSamples.filter { Calendar.current.isDateInToday($0.timestamp) }
+        guard !today.isEmpty else { return nil }
+        return today.map(\.stressLevel).reduce(0, +) / today.count
+    }
+
+    private func stressColor(_ level: Int) -> Color {
+        switch level {
+        case ..<30:   return .mint
+        case 30..<60: return .green
+        case 60..<80: return .orange
+        default:      return .red
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Header
+            HStack(spacing: 8) {
+                Image(systemName: "brain.head.profile")
+                    .font(.system(size: 20))
+                    .foregroundStyle(.purple)
+
+                Text("Stress")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.purple)
+
+                Spacer()
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+
+            // Metric row
+            HStack(alignment: .bottom, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(latestLevel.map(String.init) ?? "--")
+                            .font(.system(size: 32, weight: .semibold, design: .rounded))
+                            .foregroundStyle(latestLevel.map { stressColor($0) } ?? .secondary)
+                            .contentTransition(.numericText())
+
+                        Text("/100")
+                            .font(.system(size: 16, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    // Zone label + avg
+                    HStack(spacing: 6) {
+                        if let level = latestLevel {
+                            Capsule()
+                                .fill(stressColor(level).opacity(0.15))
+                                .overlay {
+                                    Text(RingConstants.stressLabel(for: level))
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(stressColor(level))
+                                }
+                                .frame(height: 20)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+
+                        if let avg = avgToday {
+                            Text("Avg \(avg) today")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                Spacer()
+
+                // Sparkline chart
+                if !recentSamples.isEmpty {
+                    Chart {
+                        ForEach(recentSamples, id: \.timestamp) { sample in
+                            BarMark(
+                                x: .value("Time", sample.timestamp),
+                                y: .value("Stress", sample.stressLevel)
+                            )
+                            .foregroundStyle(stressColor(sample.stressLevel).gradient)
+                            .cornerRadius(2)
+                        }
+                        // Threshold rules at 30, 60, 80
+                        RuleMark(y: .value("", 30))
+                            .foregroundStyle(.green.opacity(0.35))
+                            .lineStyle(StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
+                        RuleMark(y: .value("", 60))
+                            .foregroundStyle(.orange.opacity(0.35))
+                            .lineStyle(StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
+                    }
+                    .chartXAxis(.hidden)
+                    .chartYAxis(.hidden)
+                    .chartYScale(domain: 0 ... 100)
+                    .frame(width: 80, height: 44)
+                } else {
+                    // Empty bars placeholder
+                    HStack(alignment: .bottom, spacing: 2) {
+                        ForEach(0 ..< 8, id: \.self) { _ in
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(Color.purple.opacity(0.1))
+                                .frame(width: 7, height: CGFloat.random(in: 8 ... 28))
+                        }
+                    }
+                    .frame(width: 80, height: 44)
+                }
+            }
+        }
+        .padding()
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .task {
+            storageSamples = (try? await ring.storageManager.loadStress()) ?? []
+        }
+        .onChange(of: ring.stressSamples) {
+            Task {
+                storageSamples = (try? await ring.storageManager.loadStress()) ?? []
+            }
+        }
+    }
+}
+
+// MARK: - Mini Sleep Chart (widget thumbnail)
+
+struct MiniSleepChart: View {
+    let records: [SleepRecord]
+
+    var body: some View {
+        Chart(records, id: \.startTime) { r in
+            RectangleMark(
+                xStart: .value("Start", r.startTime),
+                xEnd: .value("End", r.endTime),
+                y: .value("Stage", r.sleepType.displayName)
+            )
+            .foregroundStyle(r.sleepType.chartColor.gradient)
+            .cornerRadius(2)
+        }
+        .chartXAxis(.hidden)
+        .chartYAxis(.hidden)
+        .padding(4)
+        .background(Color(.tertiarySystemFill))
     }
 }
 

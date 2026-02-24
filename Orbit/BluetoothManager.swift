@@ -14,6 +14,8 @@ class BluetoothManager: NSObject {
 
     var uartRxCharacteristic: CBCharacteristic?
     var uartTxCharacteristic: CBCharacteristic?
+    var mainWriteCharacteristic: CBCharacteristic?
+    var mainNotifyCharacteristic: CBCharacteristic?
     var deviceInfoHardwareCharacteristic: CBCharacteristic?
     var deviceInfoFirmwareCharacteristic: CBCharacteristic?
 
@@ -48,7 +50,6 @@ class BluetoothManager: NSObject {
             return
         }
 
-        sessionManager.realtimeManager?.stopRealtimeSteps()
         manager.cancelPeripheralConnection(peripheral)
     }
 
@@ -147,7 +148,12 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
         sessionManager.peripheralConnected = false
         sessionManager.peripheralReady = false
-        sessionManager.realtimeManager?.stopRealtimeSteps()
+        // Resume any waiting sync continuation so it doesn't hang forever
+        let cb = sessionManager.syncCompletionCallback
+        sessionManager.syncCompletionCallback = nil
+        sessionManager.isSyncing = false
+        cb?()
+        sessionManager.sendDisconnectedNotification()
     }
 
     func centralManager(_: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: (any Error)?) {
@@ -182,7 +188,11 @@ extension BluetoothManager: CBPeripheralDelegate {
                 ], for: service)
 
             case CBUUID(string: RingConstants.mainServiceUUID):
-                print("Found main service")
+                print("Found main service, discovering characteristics...")
+                peripheral.discoverCharacteristics([
+                    CBUUID(string: RingConstants.mainWriteCharacteristicUUID),
+                    CBUUID(string: RingConstants.mainNotifyCharacteristicUUID),
+                ], for: service)
 
             default:
                 break
@@ -208,6 +218,15 @@ extension BluetoothManager: CBPeripheralDelegate {
             case CBUUID(string: RingConstants.uartTxCharacteristicUUID):
                 print("Found UART TX characteristic")
                 uartTxCharacteristic = characteristic
+                peripheral.setNotifyValue(true, for: characteristic)
+
+            case CBUUID(string: RingConstants.mainWriteCharacteristicUUID):
+                print("Found V2 main write characteristic")
+                mainWriteCharacteristic = characteristic
+
+            case CBUUID(string: RingConstants.mainNotifyCharacteristicUUID):
+                print("Found V2 main notify characteristic")
+                mainNotifyCharacteristic = characteristic
                 peripheral.setNotifyValue(true, for: characteristic)
 
             case CBUUID(string: RingConstants.deviceHardwareUUID):
@@ -263,6 +282,12 @@ extension BluetoothManager: CBPeripheralDelegate {
         // Handle UART TX notifications
         if characteristic.uuid == CBUUID(string: RingConstants.uartTxCharacteristicUUID) {
             print("Received packet: \(packet.map { String(format: "%02X", $0) }.joined(separator: " "))")
+            sessionManager.syncManager?.handlePacket(packet)
+        }
+
+        // Handle V2 main notify characteristic (big data responses)
+        if characteristic.uuid == CBUUID(string: RingConstants.mainNotifyCharacteristicUUID) {
+            print("Received V2 packet: \(packet.map { String(format: "%02X", $0) }.joined(separator: " "))")
             sessionManager.syncManager?.handlePacket(packet)
         }
     }

@@ -1,405 +1,299 @@
-//
-//  HeartRateView.swift
-//  Orbit
-//
-//  Created by Daniele Rolli on 1/28/26.
-//
+// HeartRateView.swift — Orbit
 
 import Charts
-import HealthKit
 import SwiftUI
 
 struct HeartRateView: View {
     @Environment(RingSessionManager.self) var ring
-    @State private var selectedRange: TimeRange = .day
-    @State private var isStreaming = false
-    @State private var streamingTimer: Timer?
-    @State private var isRefreshing = false
+    @State private var selectedRange: TimeRange = .week
+    @State private var isLoading = false
+    @State private var historicalSamples: [HeartRateSample] = []
+    @State private var historicalHRV: [HRVSample] = []
 
     enum TimeRange: String, CaseIterable {
-        case day = "Day"
-        case week = "Week"
-        case month = "Month"
-
-        var days: Int {
-            switch self {
-            case .day: return 1
-            case .week: return 7
-            case .month: return 30
-            }
-        }
+        case day = "Day", week = "Week", month = "Month"
+        var days: Int { switch self { case .day: 1; case .week: 7; case .month: 30 } }
     }
 
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
-                liveHeartRateCard
-                heartRateChartCard
+                latestReadingCard
+                heartRateRangeCard
                 heartRateStatsCard
                 restingHeartRateCard
                 hrvCard
-
-                if !isStreaming {
-                    measureButton
-                }
             }
             .padding()
         }
         .navigationTitle("Heart")
         .navigationBarTitleDisplayMode(.large)
-        .refreshable {
-            await refreshHistoricalData()
-        }
-        .onDisappear {
-            stopStreaming()
+        .refreshable { await loadFromStorage() }
+        .task { await loadFromStorage() }
+        .overlay {
+            if isLoading {
+                ProgressView("Loading…")
+                    .padding()
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            }
         }
     }
 
-    private func refreshHistoricalData() async {
-        isRefreshing = true
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
-        isRefreshing = false
+    private func loadFromStorage() async {
+        isLoading = true
+        do {
+            historicalSamples = try await ring.storageManager.loadHeartRate()
+            historicalHRV     = try await ring.storageManager.loadHRV()
+        } catch { }
+        isLoading = false
     }
 }
 
+// MARK: - Latest Reading Card
+
 extension HeartRateView {
-    private var liveHeartRateCard: some View {
+    private var latestReadingCard: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("HEART RATE")
-                        .font(.caption)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(.secondary)
-
+                        .font(.caption).fontWeight(.semibold).foregroundStyle(.secondary)
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        Text("\(ring.realtimeHeartRate ?? 0)")
+                        Text(latestHeartRate.map(String.init) ?? "--")
                             .font(.system(size: 56, weight: .semibold, design: .rounded))
                             .contentTransition(.numericText())
-
                         Text("BPM")
-                            .font(.title3)
-                            .fontWeight(.medium)
-                            .foregroundStyle(.secondary)
+                            .font(.title3).fontWeight(.medium).foregroundStyle(.secondary)
                     }
                 }
-
                 Spacer()
-
                 Image(systemName: "heart.fill")
                     .font(.system(size: 40))
-                    .foregroundStyle(isStreaming ? .red : .gray.opacity(0.3))
-                    .symbolEffect(.pulse, isActive: isStreaming)
+                    .foregroundStyle(latestHeartRate != nil ? .red : .gray.opacity(0.3))
             }
-
-            HStack {
-                Circle()
-                    .fill(isStreaming ? .red : .gray)
-                    .frame(width: 8, height: 8)
-
-                Text(isStreaming ? "Live" : "Not recording")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-
-                if isStreaming {
-                    Spacer()
-                    Text("Auto-stops in 1 min")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+            if let latest = historicalSamples.last {
+                Label("Last recorded \(latest.timestamp.formatted(.relative(presentation: .named)))",
+                      systemImage: "clock")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text("No recorded data — sync your ring to populate history")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
         .padding(20)
-        .background(
-            RoundedRectangle(cornerRadius: 20)
-                .fill(.ultraThinMaterial)
-        )
+        .background(RoundedRectangle(cornerRadius: 20).fill(.ultraThinMaterial))
+    }
+
+    private var latestHeartRate: Int? {
+        ring.latestMeasuredHeartRate ?? historicalSamples.last?.heartRate
     }
 }
 
+// MARK: - Heart Rate Range Chart Card
+
 extension HeartRateView {
-    private var heartRateChartCard: some View {
+    private var heartRateRangeCard: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text("Trends")
-                    .font(.title3)
-                    .fontWeight(.semibold)
-
-                Spacer()
-
-                Picker("Range", selection: $selectedRange.animation(.easeInOut)) {
-                    ForEach(TimeRange.allCases, id: \.self) {
-                        Text($0.rawValue).tag($0)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Range").font(.title3).fontWeight(.semibold)
+                    if let lo = filteredSamples.map(\.heartRate).min(),
+                       let hi = filteredSamples.map(\.heartRate).max() {
+                        Text("\(lo)–\(hi) BPM")
+                            .font(.system(.title2, design: .rounded).weight(.semibold))
                     }
                 }
-                .pickerStyle(.segmented)
-                .frame(width: 200)
+                Spacer()
+                Picker("Range", selection: $selectedRange.animation(.easeInOut)) {
+                    ForEach(TimeRange.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented).frame(width: 200)
             }
 
             if filteredSamples.isEmpty {
-                emptyStateView
+                emptyState(icon: "heart.text.square", message: "No data for this period")
+            } else if selectedRange == .day {
+                // Day: individual readings as lollipop line
+                LollipopChart(
+                    points: filteredSamples.map {
+                        LollipopChart.Point(date: $0.timestamp,
+                                           value: Double($0.heartRate),
+                                           label: "\($0.heartRate) BPM")
+                    },
+                    color: .red, yLabel: "BPM",
+                    yDomain: hrDomain, xStride: .hour, xFormat: .dateTime.hour()
+                )
+                .frame(height: 220)
             } else {
-                heartRateChart
+                // Week/Month: daily range capsules with lollipop callout
+                RangeLollipopChart(buckets: hrBuckets, color: .red, yLabel: "BPM")
+                    .frame(height: 220)
             }
         }
         .padding(20)
-        .background(
-            RoundedRectangle(cornerRadius: 20)
-                .fill(.ultraThinMaterial)
-        )
+        .background(RoundedRectangle(cornerRadius: 20).fill(.ultraThinMaterial))
     }
 
-    private var heartRateChart: some View {
-        Chart {
-            ForEach(filteredSamples, id: \.timestamp) { sample in
-                LineMark(
-                    x: .value("Time", sample.timestamp),
-                    y: .value("BPM", sample.heartRate)
-                )
-                .foregroundStyle(.red)
-                .lineStyle(StrokeStyle(lineWidth: 2.5))
-                .interpolationMethod(.catmullRom)
-
-                AreaMark(
-                    x: .value("Time", sample.timestamp),
-                    y: .value("BPM", sample.heartRate)
-                )
-                .foregroundStyle(.red.opacity(0.15))
-                .interpolationMethod(.catmullRom)
-            }
-
-            if let avg = averageHeartRate {
-                RuleMark(y: .value("Average", avg))
-                    .foregroundStyle(.red.opacity(0.3))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [5, 5]))
-            }
+    private var hrBuckets: [RangeLollipopChart.Bucket] {
+        let grouped = Dictionary(grouping: filteredSamples) {
+            Calendar.current.startOfDay(for: $0.timestamp)
         }
-        .chartXAxis {
-            AxisMarks(values: .stride(by: xAxisStride)) {
-                AxisGridLine()
-                AxisValueLabel(format: xAxisFormat)
-            }
-        }
-        .chartYAxis {
-            AxisMarks(position: .leading) {
-                AxisGridLine()
-                AxisValueLabel()
-            }
-        }
-        .chartYScale(domain: yAxisDomain)
-        .frame(height: 200)
+        return grouped.map { (day, samples) in
+            let vals = samples.map { Double($0.heartRate) }
+            return RangeLollipopChart.Bucket(
+                date: day, min: vals.min() ?? 0,
+                avg: vals.reduce(0, +) / Double(vals.count),
+                max: vals.max() ?? 0, unit: "BPM"
+            )
+        }.sorted { $0.date < $1.date }
     }
 
-    private var emptyStateView: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "chart.line.uptrend.xyaxis")
-                .font(.system(size: 48))
-                .foregroundStyle(.secondary.opacity(0.5))
-
-            Text("No Data Available")
-                .font(.headline)
-                .foregroundStyle(.secondary)
-
-            Text("Pull down to refresh historical data")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .frame(height: 200)
-        .frame(maxWidth: .infinity)
-    }
-
-    private var filteredSamples: [HeartRateSample] {
-        let now = Date()
-        let interval = Double(selectedRange.days) * 86400
-        return ring.heartRateSamples.filter {
-            $0.timestamp > now.addingTimeInterval(-interval)
-        }
-    }
-
-    private var xAxisStride: Calendar.Component {
-        switch selectedRange {
-        case .day: return .hour
-        case .week, .month: return .day
-        }
-    }
-
-    private var xAxisFormat: Date.FormatStyle {
-        switch selectedRange {
-        case .day: return .dateTime.hour()
-        case .week: return .dateTime.weekday(.abbreviated)
-        case .month: return .dateTime.day()
-        }
-    }
-
-    private var yAxisDomain: ClosedRange<Int> {
-        let values = filteredSamples.map(\.heartRate)
-        guard let min = values.min(), let max = values.max() else {
-            return 40 ... 200
-        }
-        let padding = (max - min) / 5
-        return (min - padding) ... (max + padding)
-    }
-
-    private var averageHeartRate: Int? {
-        let values = filteredSamples.map(\.heartRate)
-        guard !values.isEmpty else { return nil }
-        return values.reduce(0, +) / values.count
+    private var hrDomain: ClosedRange<Double> {
+        let vals = filteredSamples.map { Double($0.heartRate) }
+        guard let lo = vals.min(), let hi = vals.max() else { return 40...200 }
+        let pad = max(5.0, (hi - lo) / 5); return (lo - pad)...(hi + pad)
     }
 }
+
+// MARK: - Stats Card
 
 extension HeartRateView {
     private var heartRateStatsCard: some View {
         HStack(spacing: 0) {
-            statColumn("Low", value: filteredSamples.map(\.heartRate).min(), color: .blue)
+            statCol("Low",     value: filteredSamples.map(\.heartRate).min(), color: .blue)
             Divider().frame(height: 60)
-            statColumn("Average", value: averageHeartRate, color: .orange)
+            statCol("Average", value: averageHeartRate,                       color: .orange)
             Divider().frame(height: 60)
-            statColumn("High", value: filteredSamples.map(\.heartRate).max(), color: .red)
+            statCol("High",    value: filteredSamples.map(\.heartRate).max(), color: .red)
         }
         .padding(.vertical, 20)
-        .background(
-            RoundedRectangle(cornerRadius: 20)
-                .fill(.ultraThinMaterial)
-        )
+        .background(RoundedRectangle(cornerRadius: 20).fill(.ultraThinMaterial))
     }
 
-    private func statColumn(_ title: String, value: Int?, color: Color) -> some View {
-        VStack(spacing: 8) {
+    private func statCol(_ title: String, value: Int?, color: Color) -> some View {
+        VStack(spacing: 6) {
             Text(value.map(String.init) ?? "--")
-                .font(.system(size: 32, weight: .semibold, design: .rounded))
-                .foregroundStyle(color)
+                .font(.system(size: 32, weight: .semibold, design: .rounded)).foregroundStyle(color)
+            Text(title).font(.subheadline).foregroundStyle(.secondary)
+            Text("BPM").font(.caption2).foregroundStyle(.secondary)
+        }.frame(maxWidth: .infinity)
+    }
 
-            Text(title)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-
-            Text("BPM")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
+    private var averageHeartRate: Int? {
+        let v = filteredSamples.map(\.heartRate); guard !v.isEmpty else { return nil }
+        return v.reduce(0, +) / v.count
     }
 }
+
+// MARK: - Resting HR Card
 
 extension HeartRateView {
     private var restingHeartRateCard: some View {
         HStack {
             VStack(alignment: .leading, spacing: 8) {
-                Text("RESTING")
-                    .font(.caption)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.secondary)
-
+                Text("RESTING").font(.caption).fontWeight(.semibold).foregroundStyle(.secondary)
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text("--")
+                    Text(restingHeartRate.map(String.init) ?? "--")
                         .font(.system(size: 40, weight: .semibold, design: .rounded))
-
-                    Text("BPM")
-                        .font(.callout)
-                        .fontWeight(.medium)
-                        .foregroundStyle(.secondary)
+                    Text("BPM").font(.callout).fontWeight(.medium).foregroundStyle(.secondary)
                 }
-
-                Text("No data today")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Text(restingHeartRate != nil ? "Lowest in past 24 h" : "No data in past 24 h")
+                    .font(.caption).foregroundStyle(.secondary)
             }
-
             Spacer()
-
-            Image(systemName: "bed.double.fill")
-                .font(.system(size: 36))
-                .foregroundStyle(.indigo)
+            Image(systemName: "bed.double.fill").font(.system(size: 36)).foregroundStyle(.indigo)
         }
         .padding(20)
-        .background(
-            RoundedRectangle(cornerRadius: 20)
-                .fill(.ultraThinMaterial)
-        )
+        .background(RoundedRectangle(cornerRadius: 20).fill(.ultraThinMaterial))
+    }
+
+    private var restingHeartRate: Int? {
+        historicalSamples
+            .filter { $0.timestamp > Date().addingTimeInterval(-86400) }
+            .map(\.heartRate).min()
     }
 }
+
+// MARK: - HRV Card (Range + Lollipop)
 
 extension HeartRateView {
     private var hrvCard: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("HEART RATE VARIABILITY")
-                    .font(.caption)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.secondary)
-
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text(ring.hrvSamples.last.map { "\($0.hrvValue)" } ?? "--")
-                        .font(.system(size: 40, weight: .semibold, design: .rounded))
-
-                    Text("ms")
-                        .font(.callout)
-                        .fontWeight(.medium)
-                        .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("HRV").font(.title3).fontWeight(.semibold)
+                    if let latest = historicalHRV.last {
+                        HStack(alignment: .firstTextBaseline, spacing: 4) {
+                            Text("\(latest.hrvValue)")
+                                .font(.system(size: 40, weight: .semibold, design: .rounded))
+                            Text("ms").font(.callout).fontWeight(.medium).foregroundStyle(.secondary)
+                        }
+                    }
                 }
-
-                Text("SDNN")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Spacer()
+                Image(systemName: "waveform.path.ecg").font(.system(size: 30)).foregroundStyle(.cyan)
             }
+            Text("SDNN — heart rate variability").font(.caption).foregroundStyle(.secondary)
 
-            Spacer()
-
-            Image(systemName: "waveform.path.ecg")
-                .font(.system(size: 36))
-                .foregroundStyle(.cyan)
+            if filteredHRV.isEmpty {
+                emptyState(icon: "waveform", message: "No HRV data for this period")
+            } else if selectedRange == .day {
+                LollipopChart(
+                    points: filteredHRV.map {
+                        LollipopChart.Point(date: $0.timestamp,
+                                           value: Double($0.hrvValue),
+                                           label: "\($0.hrvValue) ms")
+                    },
+                    color: .cyan, yLabel: "ms",
+                    yDomain: nil, xStride: .hour, xFormat: .dateTime.hour()
+                )
+                .frame(height: 180)
+            } else {
+                RangeLollipopChart(buckets: hrvBuckets, color: .cyan, yLabel: "ms")
+                    .frame(height: 180)
+            }
         }
         .padding(20)
-        .background(
-            RoundedRectangle(cornerRadius: 20)
-                .fill(.ultraThinMaterial)
-        )
+        .background(RoundedRectangle(cornerRadius: 20).fill(.ultraThinMaterial))
     }
-}
 
-extension HeartRateView {
-    private var measureButton: some View {
-        Button {
-            startStreaming()
-        } label: {
-            HStack {
-                Image(systemName: "heart.fill")
-                Text("Measure Heart Rate")
-                    .fontWeight(.semibold)
-            }
-            .frame(maxWidth: .infinity)
-            .frame(height: 54)
-            .foregroundStyle(.white)
-            .background(
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(Color.red)
+    private var filteredHRV: [HRVSample] {
+        let cutoff = Date().addingTimeInterval(-Double(selectedRange.days) * 86400)
+        return historicalHRV.filter { $0.timestamp > cutoff }.sorted { $0.timestamp < $1.timestamp }
+    }
+
+    private var hrvBuckets: [RangeLollipopChart.Bucket] {
+        let grouped = Dictionary(grouping: filteredHRV) {
+            Calendar.current.startOfDay(for: $0.timestamp)
+        }
+        return grouped.map { (day, samples) in
+            let vals = samples.map { Double($0.hrvValue) }
+            return RangeLollipopChart.Bucket(
+                date: day, min: vals.min() ?? 0,
+                avg: vals.reduce(0, +) / Double(vals.count),
+                max: vals.max() ?? 0, unit: "ms"
             )
-        }
+        }.sorted { $0.date < $1.date }
     }
 }
 
-extension HeartRateView {
-    private func startStreaming() {
-        isStreaming = true
-        ring.startRealtimeHeartRate()
+// MARK: - Shared helpers
 
-        streamingTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: false) { _ in
-            stopStreaming()
-        }
+extension HeartRateView {
+    private var filteredSamples: [HeartRateSample] {
+        let cutoff = Date().addingTimeInterval(-Double(selectedRange.days) * 86400)
+        return historicalSamples.filter { $0.timestamp > cutoff }.sorted { $0.timestamp < $1.timestamp }
     }
 
-    private func stopStreaming() {
-        guard isStreaming else { return }
-        isStreaming = false
-        ring.stopRealtimeHeartRate()
-        streamingTimer?.invalidate()
-        streamingTimer = nil
+    private func emptyState(icon: String, message: String) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: icon).font(.system(size: 40)).foregroundStyle(.secondary.opacity(0.4))
+            Text(message).font(.subheadline).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity).frame(height: 180)
     }
 }
 
 #Preview {
-    NavigationStack {
-        HeartRateView()
-            .environment(RingSessionManager())
-    }
+    NavigationStack { HeartRateView().environment(RingSessionManager()) }
 }

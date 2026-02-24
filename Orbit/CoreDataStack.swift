@@ -15,7 +15,7 @@ class CoreDataStack {
 
     // MARK: - Core Data Stack
 
-    lazy var persistentContainer: NSPersistentContainer = {
+    let persistentContainer: NSPersistentContainer = {
         let container = NSPersistentContainer(name: "OrbitDataModel")
 
         // Configure store description for encryption

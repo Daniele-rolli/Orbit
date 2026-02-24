@@ -31,17 +31,22 @@ class CommandManager {
         let calendar = Calendar.current
         let components = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: now)
 
+        // Ring expects BCD encoding (like Gadgetbridge):
+        // each decimal value is encoded by parsing its digit string as hex.
+        // e.g. hour=16 → "16" parsed as hex → 0x16, NOT raw 0x10.
+        func bcd(_ value: Int) -> UInt8 { UInt8(strtoul(String(value), nil, 16)) }
+
         let subData: [UInt8] = [
-            UInt8((components.year! % 2000)),
-            UInt8(components.month!),
-            UInt8(components.day!),
-            UInt8(components.hour!),
-            UInt8(components.minute!),
-            UInt8(components.second!),
+            bcd(components.year! % 2000),
+            bcd(components.month!),
+            bcd(components.day!),
+            bcd(components.hour!),
+            bcd(components.minute!),
+            bcd(components.second!),
         ]
 
         sendCommand(RingConstants.CMD_SET_DATE_TIME, subData: subData)
-        print("Set date/time: \(now)")
+        print("Set date/time: \(now) → BCD bytes: \(subData.map { String(format: "%02X", $0) }.joined(separator: " "))")
     }
 
     func requestBatteryInfo() {

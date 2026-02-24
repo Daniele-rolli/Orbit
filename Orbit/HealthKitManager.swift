@@ -11,7 +11,6 @@ import HealthKit
 class HealthKitManager {
     private let healthStore = HKHealthStore()
 
-    /// Data types we want to write
     private let typesToWrite: Set<HKSampleType> = [
         HKQuantityType.quantityType(forIdentifier: .heartRate)!,
         HKQuantityType.quantityType(forIdentifier: .stepCount)!,
@@ -23,7 +22,6 @@ class HealthKitManager {
         HKCategoryType.categoryType(forIdentifier: .sleepAnalysis)!,
     ]
 
-    /// Data types we want to read (optional - for comparing/deduplication)
     private let typesToRead: Set<HKObjectType> = [
         HKQuantityType.quantityType(forIdentifier: .heartRate)!,
         HKQuantityType.quantityType(forIdentifier: .stepCount)!,

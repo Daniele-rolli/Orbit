@@ -81,15 +81,20 @@ struct StepsView: View {
 
     // MARK: - Daily Aggregation
 
+    private var validHistoricalSamples: [ActivitySample] {
+        let latestAllowed = Date().addingTimeInterval(6 * 3600)
+        return historicalSamples.filter { $0.timestamp <= latestAllowed }
+    }
+
     /// Most recent calendar day that has data
     private var mostRecentDay: Date? {
-        guard let last = historicalSamples.last else { return nil }
+        guard let last = validHistoricalSamples.max(by: { $0.timestamp < $1.timestamp }) else { return nil }
         return Calendar.current.startOfDay(for: last.timestamp)
     }
 
     private var mostRecentDaySamples: [ActivitySample] {
         guard let day = mostRecentDay else { return [] }
-        return historicalSamples.filter {
+        return validHistoricalSamples.filter {
             Calendar.current.startOfDay(for: $0.timestamp) == day
         }
     }
@@ -301,7 +306,10 @@ extension StepsView {
                         }
                 }
                 .chartXAxis {
-                    AxisMarks(values: .stride(by: xAxisStride)) { AxisGridLine(); AxisValueLabel(format: xAxisFormat) }
+                    AxisMarks(values: .stride(by: xAxisStride, count: xAxisCount)) {
+                        AxisGridLine()
+                        AxisValueLabel(format: xAxisFormat)
+                    }
                 }
                 .frame(height: 200)
             }
@@ -386,7 +394,23 @@ extension StepsView {
     }
 
     private var xAxisStride: Calendar.Component { selectedRange == .week ? .day : .weekOfYear }
-    private var xAxisFormat: Date.FormatStyle { selectedRange == .week ? .dateTime.weekday(.abbreviated) : .dateTime.month(.abbreviated).day() }
+    private var xAxisCount: Int {
+        switch selectedRange {
+        case .week: return 1
+        case .month: return 1
+        case .threeMonths: return 2
+        }
+    }
+    private var xAxisFormat: Date.FormatStyle {
+        switch selectedRange {
+        case .week:
+            return .dateTime.weekday(.narrow)
+        case .month:
+            return .dateTime.month(.abbreviated).day()
+        case .threeMonths:
+            return .dateTime.month(.abbreviated)
+        }
+    }
 
     private var averageSteps: Int {
         guard !dailyAggregateSamples.isEmpty else { return 0 }

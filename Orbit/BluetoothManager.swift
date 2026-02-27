@@ -288,7 +288,7 @@ extension BluetoothManager: CBPeripheralDelegate {
         // Handle V2 main notify characteristic (big data responses)
         if characteristic.uuid == CBUUID(string: RingConstants.mainNotifyCharacteristicUUID) {
             print("Received V2 packet: \(packet.map { String(format: "%02X", $0) }.joined(separator: " "))")
-            sessionManager.syncManager?.handlePacket(packet)
+            sessionManager.syncManager?.handleV2Packet(packet)
         }
     }
 

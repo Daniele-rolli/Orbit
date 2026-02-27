@@ -70,6 +70,7 @@ class RingSessionManager: NSObject {
     var commandManager: CommandManager!
     var syncManager: SyncManager!
     var storageManager: StorageManager!
+    private let healthKitManager = HealthKitManager()
 
     // MARK: - Callbacks
 
@@ -85,6 +86,8 @@ class RingSessionManager: NSObject {
     var syncCompletionCallback: (() -> Void)?
     /// True while a BLE sync chain is in progress. Guards against concurrent syncs.
     var isSyncing: Bool = false
+    var healthKitLastSyncDate: Date?
+    var healthKitLastSyncError: String?
 
     // MARK: - Initialization
 
@@ -316,6 +319,7 @@ class RingSessionManager: NSObject {
 
     /// Async wrapper around the BLE sync chain. Serial — if a sync is already running
     /// this waits for it to complete rather than starting a second parallel chain.
+    @MainActor
     func fetchAllHistoricalDataAsync() async {
         // If already syncing, wait for it to finish rather than racing.
         if isSyncing {
@@ -349,6 +353,7 @@ class RingSessionManager: NSObject {
         }
 
         isSyncing = false
+        await syncHealthKitIfNeeded()
     }
 
     func fetchAllHistoricalData(completion: @escaping () -> Void) {
@@ -366,6 +371,77 @@ class RingSessionManager: NSObject {
     func fetchHistoryHRV(daysAgo: Int = 0, completion: (([HRVSample]) -> Void)? = nil) {
         hrvHistoryCallback = completion
         syncManager.fetchHistoryHRV(daysAgo: daysAgo)
+    }
+
+    // MARK: - HealthKit
+
+    private var healthKitAutoSyncEnabled: Bool {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: "healthKitAutoSyncEnabled") == nil {
+            return true
+        }
+        return defaults.bool(forKey: "healthKitAutoSyncEnabled")
+    }
+
+    func setHealthKitAutoSyncEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: "healthKitAutoSyncEnabled")
+    }
+
+    func isHealthKitAuthorized() -> Bool {
+        healthKitManager.isAuthorized()
+    }
+
+    @MainActor
+    @discardableResult
+    func requestHealthKitAuthorization() async -> Bool {
+        do {
+            try await healthKitManager.requestAuthorization()
+            healthKitLastSyncError = nil
+            return healthKitManager.isAuthorized()
+        } catch {
+            healthKitLastSyncError = error.localizedDescription
+            print("HealthKit auth failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @MainActor
+    @discardableResult
+    func syncHealthKitNow(requestAuthorizationIfNeeded: Bool = true) async -> Bool {
+        if requestAuthorizationIfNeeded, !healthKitManager.isAuthorized() {
+            let granted = await requestHealthKitAuthorization()
+            guard granted else { return false }
+        }
+
+        guard healthKitManager.isAuthorized() else {
+            healthKitLastSyncError = "HealthKit permission is not granted."
+            return false
+        }
+
+        do {
+            try await healthKitManager.syncAllData(
+                heartRate: heartRateSamples,
+                activity: activitySamples,
+                sleep: sleepRecords,
+                spO2: spO2Samples,
+                hrv: hrvSamples,
+                temperature: temperatureSamples
+            )
+            healthKitLastSyncDate = Date()
+            healthKitLastSyncError = nil
+            return true
+        } catch {
+            healthKitLastSyncError = error.localizedDescription
+            print("HealthKit sync failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @MainActor
+    private func syncHealthKitIfNeeded() async {
+        guard healthKitAutoSyncEnabled else { return }
+        guard healthKitManager.isAuthorized() else { return }
+        _ = await syncHealthKitNow(requestAuthorizationIfNeeded: false)
     }
 
     // MARK: - Storage Manager API

@@ -99,7 +99,7 @@ extension SleepView {
                     Image(systemName: "moon.stars.fill").font(.system(size: 28)).foregroundStyle(scoreColor(todaySleepScore))
                 }
             }
-            if let s = todaySleepSession {
+            if let s = selectedSleepSession {
                 HStack(spacing: 16) {
                     sleepTimeInfo(icon: "bed.double.fill",  time: s.bedTime,  label: "Bedtime")
                     Divider().frame(height: 30)
@@ -112,7 +112,7 @@ extension SleepView {
                 }
                 .padding(.top, 4)
             } else {
-                Text("No sleep data for the most recent night.")
+                Text("No sleep data for the selected date.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -322,13 +322,20 @@ extension SleepView {
         VStack(alignment: .leading, spacing: 16) {
             Text("During Sleep").font(.title3).fontWeight(.semibold)
 
-            if let session = todaySleepSession {
+            if let session = selectedSleepSession {
                 let sleepHR  = heartRateSamples.filter { $0.timestamp >= session.bedTime && $0.timestamp <= session.wakeTime }
                 let sleepHRV = hrvSamples.filter       { $0.timestamp >= session.bedTime && $0.timestamp <= session.wakeTime }
 
                 if sleepHR.isEmpty && sleepHRV.isEmpty {
-                    Text("No heart rate or HRV data recorded during this sleep session.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    VStack(spacing: 10) {
+                        Image(systemName: "waveform.path.ecg")
+                            .font(.system(size: 28))
+                            .foregroundStyle(.secondary.opacity(0.5))
+                        Text("No heart rate or HRV data recorded during this sleep session.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 160)
                 } else {
                     if !sleepHR.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
@@ -370,7 +377,15 @@ extension SleepView {
                     }
                 }
             } else {
-                Text("No sleep session found.").font(.caption).foregroundStyle(.secondary)
+                VStack(spacing: 10) {
+                    Image(systemName: "moon.zzz")
+                        .font(.system(size: 28))
+                        .foregroundStyle(.secondary.opacity(0.5))
+                    Text("No sleep session found for the selected date.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, minHeight: 160)
             }
         }
         .padding(20)
@@ -517,11 +532,30 @@ extension SleepView {
         }
     }
 
+    private var sanitizedSleepRecords: [SleepRecord] {
+        let now = Date()
+        let latestAllowed = now.addingTimeInterval(2 * 86400)
+        let earliestAllowed = now.addingTimeInterval(-180 * 86400)
+
+        let filtered = historicalSleepRecords.filter { r in
+            r.startTime >= earliestAllowed &&
+                r.endTime <= latestAllowed &&
+                r.endTime > r.startTime
+        }
+
+        let deduped = Dictionary(
+            filtered.map { ("\($0.startTime.timeIntervalSince1970)|\($0.endTime.timeIntervalSince1970)|\($0.sleepType.rawValue)", $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        return deduped.values.sorted { $0.startTime < $1.startTime }
+    }
+
     private func groupSleepSessions() -> [SleepSession] {
         var sessions: [SleepSession] = [], group: [SleepRecord] = []
-        for record in historicalSleepRecords.sorted(by: { $0.startTime < $1.startTime }) {
+        for record in sanitizedSleepRecords {
             if group.isEmpty { group.append(record) }
-            else if let last = group.last, record.startTime.timeIntervalSince(last.endTime) > 3 * 3600 {
+            else if let last = group.last, record.startTime.timeIntervalSince(last.endTime) > 90 * 60 {
                 sessions.append(SleepSession(records: group)); group = [record]
             } else { group.append(record) }
         }
@@ -533,14 +567,36 @@ extension SleepView {
 // MARK: - Computed Properties
 
 extension SleepView {
-    private var allSleepSessions: [SleepSession] { groupSleepSessions() }
-
-    private var todaySleepSession: SleepSession? {
-        if let s = sleepSessionForDate(Date()) { return s }
-        let y = Calendar.current.date(byAdding: .day, value: -1, to: Date())!
-        if let s = sleepSessionForDate(y) { return s }
-        return allSleepSessions.sorted { $0.wakeTime > $1.wakeTime }.first
+    private func isPlausibleSession(_ session: SleepSession) -> Bool {
+        let totalWindow = session.wakeTime.timeIntervalSince(session.bedTime)
+        return totalWindow > 0 &&
+            totalWindow <= 16 * 3600 &&
+            session.totalSleep >= 30 * 60 &&
+            session.totalSleep <= 14 * 3600
     }
+
+    private func isLikelyMainSleep(_ session: SleepSession) -> Bool {
+        let calendar = Calendar.current
+        let bedHour = calendar.component(.hour, from: session.bedTime)
+        let wakeHour = calendar.component(.hour, from: session.wakeTime)
+        return (bedHour >= 18 || bedHour <= 6) &&
+            wakeHour <= 12 &&
+            session.totalSleep >= 2 * 3600 &&
+            session.totalSleep <= 14 * 3600
+    }
+
+    private func rankedSessions(_ sessions: [SleepSession]) -> [SleepSession] {
+        sessions.filter(isPlausibleSession).sorted {
+            let lhsMain = isLikelyMainSleep($0) ? 1 : 0
+            let rhsMain = isLikelyMainSleep($1) ? 1 : 0
+            if lhsMain != rhsMain { return lhsMain > rhsMain }
+            if $0.totalSleep != $1.totalSleep { return $0.totalSleep > $1.totalSleep }
+            return $0.wakeTime > $1.wakeTime
+        }
+    }
+
+    private var allSleepSessions: [SleepSession] { rankedSessions(groupSleepSessions()) }
+    private var selectedSleepSession: SleepSession? { sleepSessionForDate(selectedDate) }
 
     private func sleepSessionForDate(_ date: Date) -> SleepSession? {
         allSleepSessions.first { Calendar.current.isDate($0.date, inSameDayAs: date) }
@@ -551,16 +607,16 @@ extension SleepView {
         return allSleepSessions.filter { $0.date > cutoff }
     }
 
-    private var todaySleepScore: Int { todaySleepSession?.score ?? 0 }
-    private var todayTotalSleep: TimeInterval { todaySleepSession?.totalSleep ?? 0 }
-    private var todayDeepSleep: TimeInterval  { todaySleepSession?.deepSleep ?? 0 }
-    private var todayLightSleep: TimeInterval { todaySleepSession?.lightSleep ?? 0 }
-    private var todayREMSleep: TimeInterval   { todaySleepSession?.remSleep ?? 0 }
-    private var todayAwakeCount: Int          { todaySleepSession?.awakeCount ?? 0 }
+    private var todaySleepScore: Int { selectedSleepSession?.score ?? 0 }
+    private var todayTotalSleep: TimeInterval { selectedSleepSession?.totalSleep ?? 0 }
+    private var todayDeepSleep: TimeInterval  { selectedSleepSession?.deepSleep ?? 0 }
+    private var todayLightSleep: TimeInterval { selectedSleepSession?.lightSleep ?? 0 }
+    private var todayREMSleep: TimeInterval   { selectedSleepSession?.remSleep ?? 0 }
+    private var todayAwakeCount: Int          { selectedSleepSession?.awakeCount ?? 0 }
     private var deepSleepPercentage: Double   { todayTotalSleep > 0 ? (todayDeepSleep / todayTotalSleep) * 100 : 0 }
 
     private var weeklyComparison: Int? {
-        guard let score = todaySleepSession?.score, !filteredSleepSessions.isEmpty else { return nil }
+        guard let score = selectedSleepSession?.score, !filteredSleepSessions.isEmpty else { return nil }
         let avg = filteredSleepSessions.prefix(7).map(\.score).reduce(0, +) / max(1, min(7, filteredSleepSessions.count))
         return score - avg
     }
@@ -610,13 +666,22 @@ struct SleepChartView: View {
         records.map { Mark(start: $0.startTime, end: $0.endTime, label: $0.sleepType.displayName, color: $0.sleepType.chartColor) }
     }
 
+    private var hourStride: Int {
+        guard let start = records.map(\.startTime).min(),
+              let end = records.map(\.endTime).max() else { return 1 }
+        let hours = max(1, Int(ceil(end.timeIntervalSince(start) / 3600)))
+        if hours > 18 { return 4 }
+        if hours > 10 { return 2 }
+        return 1
+    }
+
     var body: some View {
         Chart(marks) { m in
             RectangleMark(xStart: .value("Start", m.start), xEnd: .value("End", m.end), y: .value("Stage", m.label))
                 .foregroundStyle(m.color.gradient).cornerRadius(4)
         }
         .chartXAxis {
-            AxisMarks(values: .stride(by: .hour)) {
+            AxisMarks(values: .stride(by: .hour, count: hourStride)) {
                 AxisGridLine()
                 AxisValueLabel(format: .dateTime.hour(.defaultDigits(amPM: .abbreviated)))
             }

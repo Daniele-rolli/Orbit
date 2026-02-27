@@ -686,6 +686,9 @@ extension PacketHandlers {
         guard packet.count >= 4, let sessionManager = sessionManager else { return }
 
         var incomingRecords: [SleepRecord] = []
+        let now = Date()
+        let earliestAllowed = now.addingTimeInterval(-180 * 86400)
+        let latestAllowed = now.addingTimeInterval(2 * 86400)
 
         let packetLength = Int(packet[2]) | (Int(packet[3]) << 8)
 
@@ -758,27 +761,44 @@ extension PacketHandlers {
                 }
 
                 let stageEnd = calendar.date(byAdding: .minute, value: sleepMinutes, to: sleepStageTime)!
+                let boundedStageEnd = min(stageEnd, sessionEnd)
 
                 if stageEnd > sessionEnd {
                     print("Sleep stage exceeds session end — data may be corrupt")
                 }
 
-                let record = SleepRecord(startTime: sleepStageTime, endTime: stageEnd, sleepType: sleepType)
-                incomingRecords.append(record)
-                print("  Sleep stage: \(sleepType) \(sleepMinutes)min [\(sleepStageTime) → \(stageEnd)]")
-                sleepStageTime = stageEnd
+                if boundedStageEnd > sleepStageTime,
+                   sleepStageTime >= earliestAllowed,
+                   boundedStageEnd <= latestAllowed
+                {
+                    let record = SleepRecord(startTime: sleepStageTime, endTime: boundedStageEnd, sleepType: sleepType)
+                    incomingRecords.append(record)
+                    print("  Sleep stage: \(sleepType) \(sleepMinutes)min [\(sleepStageTime) → \(boundedStageEnd)]")
+                }
+
+                sleepStageTime = boundedStageEnd
+                if sleepStageTime >= sessionEnd { break }
             }
         }
 
-        // Merge: keep existing records outside the incoming window; purge future-date artifacts
-        let twoDaysFromNow = Date().addingTimeInterval(2 * 86400)
-        let incomingTimestamps = Set(incomingRecords.map { $0.startTime })
+        // Merge: keep existing records outside the incoming window; purge future-date artifacts.
+        // Also de-duplicate by start timestamp to avoid duplicated stage segments inflating totals.
+        let incomingUnique = Dictionary(
+            incomingRecords.map { ($0.startTime, $0) },
+            uniquingKeysWith: { lhs, rhs in
+                rhs.endTime > lhs.endTime ? rhs : lhs
+            }
+        ).values
+        let incoming = Array(incomingUnique)
+        let incomingTimestamps = Set(incoming.map { $0.startTime })
         let kept = sessionManager.sleepRecords.filter {
-            !incomingTimestamps.contains($0.startTime) && $0.startTime < twoDaysFromNow
+            !incomingTimestamps.contains($0.startTime) &&
+                $0.startTime >= earliestAllowed &&
+                $0.startTime < latestAllowed
         }
-        sessionManager.sleepRecords = (kept + incomingRecords).sorted { $0.startTime < $1.startTime }
+        sessionManager.sleepRecords = (kept + incoming).sorted { $0.startTime < $1.startTime }
 
-        print("Sleep sync complete: \(sessionManager.sleepRecords.count) records (\(incomingRecords.count) from ring)")
+        print("Sleep sync complete: \(sessionManager.sleepRecords.count) records (\(incoming.count) from ring)")
         sessionManager.sleepHistoryCallback?(sessionManager.sleepRecords)
     }
 

@@ -18,9 +18,9 @@ struct StressView: View {
         ScrollView {
             VStack(spacing: 16) {
                 currentStressCard
-                stressTimesheetCard        // replaces stressTimelineCard
-                stressLollipopCard         // trend via lollipop
+                stressRangeCard
                 stressBreakdownCard
+                stressLollipopCard
                 stressInsightsCard
             }
             .padding()
@@ -127,74 +127,56 @@ extension StressView {
     private var latestLevel: Int? { historicalSamples.last?.stressLevel }
 }
 
-// MARK: - TimeSheet Bar Chart Card (replaces old timeline)
-// Shows today's stress readings as horizontal Gantt bars per zone
+// MARK: - Today's Range Card
 
 extension StressView {
-    private var stressTimesheetCard: some View {
+    private var stressRangeCard: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Today's Activity").font(.title3).fontWeight(.semibold)
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Today's Activity").font(.title3).fontWeight(.semibold)
+                    if let lo = todayStressBuckets.map(\.min).min(),
+                       let hi = todayStressBuckets.map(\.max).max() {
+                        Text("\(Int(lo))–\(Int(hi))")
+                            .font(.system(.title2, design: .rounded).weight(.semibold))
+                    }
+                }
+                Spacer()
+            }
 
-            let segs = todaySegments
-            if segs.isEmpty {
-                emptyState(icon: "clock.badge.questionmark", message: "No readings today yet")
+            if todayStressBuckets.isEmpty {
+                emptyState(icon: "waveform.path.ecg.rectangle", message: "No stress activity for today")
             } else {
-                let first = segs.map(\.start).min() ?? Calendar.current.startOfDay(for: Date())
-                let last  = segs.map(\.end).max()   ?? Date()
-                TimeSheetBarChart(segments: segs, domainStart: first, domainEnd: last)
-                    .frame(height: max(100, CGFloat(Set(segs.map(\.category)).count) * 44 + 20))
+                RangeLollipopChart(buckets: todayStressBuckets, color: .purple, yLabel: "Stress")
+                    .frame(height: 220)
             }
         }
         .padding(20)
         .background(RoundedRectangle(cornerRadius: 20).fill(.ultraThinMaterial))
     }
 
-    /// Convert today's stress point readings into Gantt segments.
-    /// Consecutive readings in the same zone are merged into one bar.
-    private var todaySegments: [TimeSheetBarChart.Segment] {
+    private var todayStressBuckets: [RangeLollipopChart.Bucket] {
         let sorted = historicalSamples
             .filter { Calendar.current.isDateInToday($0.timestamp) }
             .sorted { $0.timestamp < $1.timestamp }
         guard !sorted.isEmpty else { return [] }
 
-        var result: [TimeSheetBarChart.Segment] = []
-        var segStart = sorted[0].timestamp
-        var segLevel = sorted[0].stressLevel
-
-        for i in 1..<sorted.count {
-            let cur = sorted[i]
-            // If same zone and gap < 30 min, extend
-            let sameZone = stressZone(segLevel) == stressZone(cur.stressLevel)
-            let gap = cur.timestamp.timeIntervalSince(sorted[i - 1].timestamp)
-            if sameZone && gap < 1800 { continue }
-            // Emit previous segment
-            result.append(TimeSheetBarChart.Segment(
-                category: stressZone(segLevel),
-                start: segStart,
-                end: sorted[i - 1].timestamp.addingTimeInterval(300),  // +5 min visual width
-                color: stressColor(segLevel)
-            ))
-            segStart = cur.timestamp
-            segLevel = cur.stressLevel
+        let grouped = Dictionary(grouping: sorted) {
+            Calendar.current.dateInterval(of: .hour, for: $0.timestamp)?.start ?? $0.timestamp
         }
-        // Final segment
-        result.append(TimeSheetBarChart.Segment(
-            category: stressZone(segLevel),
-            start: segStart,
-            end: (sorted.last?.timestamp ?? segStart).addingTimeInterval(300),
-            color: stressColor(segLevel)
-        ))
-        return result
+
+        return grouped.map { (hour, samples) in
+            let vals = samples.map { Double($0.stressLevel) }
+            return RangeLollipopChart.Bucket(
+                date: hour,
+                min: vals.min() ?? 0,
+                avg: vals.reduce(0, +) / Double(vals.count),
+                max: vals.max() ?? 0,
+                unit: ""
+            )
+        }.sorted { $0.date < $1.date }
     }
 
-    private func stressZone(_ level: Int) -> String {
-        switch level {
-        case ..<30:   return "Relaxed"
-        case 30..<60: return "Normal"
-        case 60..<80: return "Medium"
-        default:      return "High"
-        }
-    }
 }
 
 // MARK: - Lollipop Trend Card (replaces old trend card)
@@ -213,8 +195,7 @@ extension StressView {
 
             if filteredSamples.isEmpty {
                 emptyState(icon: "waveform.path", message: "No trend data for this period")
-            } else {
-                // Lollipop with zone threshold rule marks behind
+            } else if selectedRange == .day {
                 ZStack {
                     Chart {
                         RuleMark(y: .value("Relaxed", 30))
@@ -232,22 +213,45 @@ extension StressView {
 
                     LollipopChart(
                         points: filteredSamples.map {
-                            LollipopChart.Point(date: $0.timestamp,
-                                               value: Double($0.stressLevel),
-                                               label: "\($0.stressLevel) — \(RingConstants.stressLabel(for: $0.stressLevel))")
+                            LollipopChart.Point(
+                                date: $0.timestamp,
+                                value: Double($0.stressLevel),
+                                label: "\($0.stressLevel) — \(RingConstants.stressLabel(for: $0.stressLevel))"
+                            )
                         },
                         color: .purple,
                         yLabel: "Stress",
                         yDomain: 0.0...100.0,
-                        xStride: selectedRange == .day ? .hour : .day,
-                        xFormat: selectedRange == .day ? .dateTime.hour() : .dateTime.weekday(.abbreviated)
+                        xStride: .hour,
+                        xFormat: .dateTime.hour()
                     )
                 }
                 .frame(height: 200)
+            } else {
+                RangeLollipopChart(buckets: trendBuckets, color: .purple, yLabel: "Stress")
+                    .frame(height: 220)
             }
         }
         .padding(20)
         .background(RoundedRectangle(cornerRadius: 20).fill(.ultraThinMaterial))
+    }
+
+    private var trendBuckets: [RangeLollipopChart.Bucket] {
+        let grouped = Dictionary(grouping: filteredSamples) {
+            Calendar.current.startOfDay(for: $0.timestamp)
+        }
+
+        return grouped.map { day, samples in
+            let values = samples.map { Double($0.stressLevel) }
+            return RangeLollipopChart.Bucket(
+                date: day,
+                min: values.min() ?? 0,
+                avg: values.reduce(0, +) / Double(values.count),
+                max: values.max() ?? 0,
+                unit: ""
+            )
+        }
+        .sorted { $0.date < $1.date }
     }
 }
 
@@ -256,11 +260,23 @@ extension StressView {
 extension StressView {
     private var stressBreakdownCard: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Time in Zone").font(.title3).fontWeight(.semibold)
+            HStack {
+                Text("Time in Zone").font(.title3).fontWeight(.semibold)
+                Spacer()
+                Text("\(filteredSamples.count) samples")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             if filteredSamples.isEmpty {
                 emptyState(icon: "chart.pie", message: "No data for this period")
             } else {
                 let zones = zoneBreakdown(filteredSamples)
+                HStack(spacing: 10) {
+                    summaryPill(title: "Dominant", value: dominantZoneName(for: zones), color: dominantZoneColor(for: zones))
+                    summaryPill(title: "High", value: "\(highZonePercent(for: zones))%", color: .red)
+                }
+
                 VStack(spacing: 10) {
                     zoneBar("Relaxed", value: zones.relaxed, total: filteredSamples.count, color: .mint)
                     zoneBar("Normal",  value: zones.normal,  total: filteredSamples.count, color: .green)
@@ -273,10 +289,25 @@ extension StressView {
         .background(RoundedRectangle(cornerRadius: 20).fill(.ultraThinMaterial))
     }
 
+    private func summaryPill(title: String, value: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption)
+                .fontWeight(.semibold)
+                .foregroundStyle(color)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 10).fill(color.opacity(0.12)))
+    }
+
     private func zoneBar(_ label: String, value: Int, total: Int, color: Color) -> some View {
         let pct = total > 0 ? Double(value) / Double(total) : 0
         return HStack(spacing: 12) {
-            Text(label).font(.subheadline).fontWeight(.medium).frame(width: 60, alignment: .leading)
+            Text(label).font(.subheadline).fontWeight(.medium).frame(width: 66, alignment: .leading)
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 4).fill(color.opacity(0.15)).frame(height: 8)
@@ -286,7 +317,11 @@ extension StressView {
             }.frame(height: 8)
             Text("\(Int(pct * 100))%")
                 .font(.caption).fontWeight(.semibold).foregroundStyle(color)
-                .frame(width: 36, alignment: .trailing)
+                .frame(width: 40, alignment: .trailing)
+            Text("\(value)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(width: 24, alignment: .trailing)
         }
     }
 
@@ -302,6 +337,32 @@ extension StressView {
             }
         }
         return z
+    }
+
+    private func dominantZoneName(for zones: ZoneBreakdown) -> String {
+        let entries: [(String, Int)] = [
+            ("Relaxed", zones.relaxed),
+            ("Normal", zones.normal),
+            ("Medium", zones.medium),
+            ("High", zones.high)
+        ]
+        return entries.max(by: { $0.1 < $1.1 })?.0 ?? "None"
+    }
+
+    private func dominantZoneColor(for zones: ZoneBreakdown) -> Color {
+        switch dominantZoneName(for: zones) {
+        case "Relaxed": return .mint
+        case "Normal": return .green
+        case "Medium": return .orange
+        case "High": return .red
+        default: return .secondary
+        }
+    }
+
+    private func highZonePercent(for zones: ZoneBreakdown) -> Int {
+        let total = zones.relaxed + zones.normal + zones.medium + zones.high
+        guard total > 0 else { return 0 }
+        return Int((Double(zones.high) / Double(total)) * 100)
     }
 }
 

@@ -53,8 +53,7 @@ class HealthKitManager {
 
     func canWriteData(for identifier: HKQuantityTypeIdentifier) -> Bool {
         guard let type = HKQuantityType.quantityType(forIdentifier: identifier) else { return false }
-        let status = healthStore.authorizationStatus(for: type)
-        return status == .sharingAuthorized
+        return canWrite(type)
     }
 
     func isAuthorized() -> Bool {
@@ -67,17 +66,27 @@ class HealthKitManager {
         return status == .sharingAuthorized
     }
 
+    private func canWrite(_ type: HKObjectType) -> Bool {
+        healthStore.authorizationStatus(for: type) == .sharingAuthorized
+    }
+
     // MARK: - Sync All Data
 
     func syncAllData(
         heartRate: [HeartRateSample],
         activity: [ActivitySample],
-        sleep: [SleepRecord]
+        sleep: [SleepRecord],
+        spO2: [SpO2Sample],
+        hrv: [HRVSample],
+        temperature: [TemperatureSample]
     ) async throws {
         print("Starting HealthKit sync...")
 
         try await syncHeartRate(heartRate)
         try await syncActivity(activity)
+        try await syncSpO2(spO2)
+        try await syncHRV(hrv)
+        try await syncTemperature(temperature)
         try await syncSleep(sleep)
 
         print("HealthKit sync completed")
@@ -89,6 +98,10 @@ class HealthKitManager {
         guard !samples.isEmpty else { return }
 
         let heartRateType = HKQuantityType.quantityType(forIdentifier: .heartRate)!
+        guard canWrite(heartRateType) else {
+            print("Skipping heart rate sync — not authorized")
+            return
+        }
         let heartRateUnit = HKUnit.count().unitDivided(by: .minute())
 
         let hkSamples = samples.map { sample in
@@ -115,55 +128,65 @@ class HealthKitManager {
     func syncActivity(_ samples: [ActivitySample]) async throws {
         guard !samples.isEmpty else { return }
 
-        var allSamples: [HKSample] = []
-
         // Steps
         let stepType = HKQuantityType.quantityType(forIdentifier: .stepCount)!
-        let stepSamples = samples.map { sample in
-            let quantity = HKQuantity(unit: .count(), doubleValue: Double(sample.steps))
+        if canWrite(stepType) {
+            let stepSamples = samples.map { sample in
+                let quantity = HKQuantity(unit: .count(), doubleValue: Double(sample.steps))
 
-            return HKQuantitySample(
-                type: stepType,
-                quantity: quantity,
-                start: sample.timestamp,
-                end: sample.timestamp.addingTimeInterval(60), // 1 minute duration
-                metadata: ["Source": "COLMI R02 Ring"]
-            )
+                return HKQuantitySample(
+                    type: stepType,
+                    quantity: quantity,
+                    start: sample.timestamp,
+                    end: sample.timestamp.addingTimeInterval(60), // 1 minute duration
+                    metadata: ["Source": "COLMI R02 Ring"]
+                )
+            }
+            try await healthStore.save(stepSamples)
+            print("Synced \(stepSamples.count) step samples to HealthKit")
+        } else {
+            print("Skipping steps sync — not authorized")
         }
-        allSamples.append(contentsOf: stepSamples)
 
         // Distance
         let distanceType = HKQuantityType.quantityType(forIdentifier: .distanceWalkingRunning)!
-        let distanceSamples = samples.map { sample in
-            let quantity = HKQuantity(unit: .meter(), doubleValue: Double(sample.distance))
+        if canWrite(distanceType) {
+            let distanceSamples = samples.map { sample in
+                let quantity = HKQuantity(unit: .meter(), doubleValue: Double(sample.distance))
 
-            return HKQuantitySample(
-                type: distanceType,
-                quantity: quantity,
-                start: sample.timestamp,
-                end: sample.timestamp.addingTimeInterval(60),
-                metadata: ["Source": "COLMI R02 Ring"]
-            )
+                return HKQuantitySample(
+                    type: distanceType,
+                    quantity: quantity,
+                    start: sample.timestamp,
+                    end: sample.timestamp.addingTimeInterval(60),
+                    metadata: ["Source": "COLMI R02 Ring"]
+                )
+            }
+            try await healthStore.save(distanceSamples)
+            print("Synced \(distanceSamples.count) distance samples to HealthKit")
+        } else {
+            print("Skipping distance sync — not authorized")
         }
-        allSamples.append(contentsOf: distanceSamples)
 
         // Calories
         let calorieType = HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned)!
-        let calorieSamples = samples.map { sample in
-            let quantity = HKQuantity(unit: .kilocalorie(), doubleValue: Double(sample.calories))
+        if canWrite(calorieType) {
+            let calorieSamples = samples.map { sample in
+                let quantity = HKQuantity(unit: .kilocalorie(), doubleValue: Double(sample.calories))
 
-            return HKQuantitySample(
-                type: calorieType,
-                quantity: quantity,
-                start: sample.timestamp,
-                end: sample.timestamp.addingTimeInterval(60),
-                metadata: ["Source": "COLMI R02 Ring"]
-            )
+                return HKQuantitySample(
+                    type: calorieType,
+                    quantity: quantity,
+                    start: sample.timestamp,
+                    end: sample.timestamp.addingTimeInterval(60),
+                    metadata: ["Source": "COLMI R02 Ring"]
+                )
+            }
+            try await healthStore.save(calorieSamples)
+            print("Synced \(calorieSamples.count) calorie samples to HealthKit")
+        } else {
+            print("Skipping calories sync — not authorized")
         }
-        allSamples.append(contentsOf: calorieSamples)
-
-        try await healthStore.save(allSamples)
-        print("Synced \(samples.count) activity samples to HealthKit")
     }
 
     // MARK: - SpO2
@@ -172,6 +195,10 @@ class HealthKitManager {
         guard !samples.isEmpty else { return }
 
         let spo2Type = HKQuantityType.quantityType(forIdentifier: .oxygenSaturation)!
+        guard canWrite(spo2Type) else {
+            print("Skipping SpO2 sync — not authorized")
+            return
+        }
 
         let hkSamples = samples.map { sample in
             let quantity = HKQuantity(unit: .percent(), doubleValue: Double(sample.spO2) / 100.0)
@@ -195,6 +222,10 @@ class HealthKitManager {
         guard !samples.isEmpty else { return }
 
         let hrvType = HKQuantityType.quantityType(forIdentifier: .heartRateVariabilitySDNN)!
+        guard canWrite(hrvType) else {
+            print("Skipping HRV sync — not authorized")
+            return
+        }
 
         let hkSamples = samples.map { sample in
             let quantity = HKQuantity(unit: .secondUnit(with: .milli), doubleValue: Double(sample.hrvValue))
@@ -218,6 +249,10 @@ class HealthKitManager {
         guard !samples.isEmpty else { return }
 
         let tempType = HKQuantityType.quantityType(forIdentifier: .bodyTemperature)!
+        guard canWrite(tempType) else {
+            print("Skipping temperature sync — not authorized")
+            return
+        }
 
         let hkSamples = samples.map { sample in
             let quantity = HKQuantity(unit: .degreeCelsius(), doubleValue: sample.temperature)
@@ -241,6 +276,10 @@ class HealthKitManager {
         guard !records.isEmpty else { return }
 
         let sleepType = HKCategoryType.categoryType(forIdentifier: .sleepAnalysis)!
+        guard canWrite(sleepType) else {
+            print("Skipping sleep sync — not authorized")
+            return
+        }
 
         let hkSamples = records.compactMap { record -> HKCategorySample? in
             let value: HKCategoryValueSleepAnalysis

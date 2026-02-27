@@ -233,6 +233,19 @@ class SyncManager {
         packetHandlers.handlePacket(packet)
     }
 
+    /// V2 notify payloads can arrive fragmented at ATT level. Route continuations
+    /// directly to big-data reassembly when a V2 packet is in progress.
+    func handleV2Packet(_ packet: [UInt8]) {
+        guard !packet.isEmpty else { return }
+
+        if packet[0] == RingConstants.CMD_BIG_DATA_V2 || bigDataPacket != nil {
+            packetHandlers.handleBigDataPacket(packet)
+            return
+        }
+
+        packetHandlers.handlePacket(packet)
+    }
+
     // MARK: - Sync Chain Completion
 
     func fetchRecordedDataFinished() {

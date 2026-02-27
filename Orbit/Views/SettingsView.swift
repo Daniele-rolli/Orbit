@@ -17,6 +17,7 @@ struct SettingsView: View {
     @AppStorage("stressMonitoring") private var stressMonitoring: Bool = true
     @AppStorage("hrvAllDay") private var hrvAllDay: Bool = true
     @AppStorage("tempAllDay") private var tempAllDay: Bool = true
+    @AppStorage("healthKitAutoSyncEnabled") private var healthKitAutoSyncEnabled: Bool = true
 
     // User profile
     @AppStorage("userGender") private var userGender: Int = 0
@@ -38,12 +39,14 @@ struct SettingsView: View {
 
     @State private var showDeleteConfirmation = false
     @State private var showGoalSettings = false
+    @State private var healthKitSyncInProgress = false
 
     var body: some View {
         NavigationStack {
             List {
                 deviceSection
                 monitoringSection
+                healthKitSection
                 heartRateIntervalSection
                 userProfileSection
                 goalsSection
@@ -161,6 +164,56 @@ struct SettingsView: View {
             Text("HEART RATE")
         } footer: {
             Text("How often the ring automatically measures your heart rate. Lower intervals use more battery.")
+        }
+    }
+
+    // MARK: - HealthKit
+
+    private var healthKitSection: some View {
+        Section("APPLE HEALTH") {
+            Toggle("Auto-Sync to Apple Health", isOn: $healthKitAutoSyncEnabled)
+                .onChange(of: healthKitAutoSyncEnabled) { _, enabled in
+                    ring.setHealthKitAutoSyncEnabled(enabled)
+                }
+
+            Button(ring.isHealthKitAuthorized() ? "Sync to Apple Health Now" : "Connect Apple Health") {
+                Task { @MainActor in
+                    healthKitSyncInProgress = true
+                    defer { healthKitSyncInProgress = false }
+
+                    if ring.isHealthKitAuthorized() {
+                        _ = await ring.syncHealthKitNow(requestAuthorizationIfNeeded: false)
+                    } else {
+                        let granted = await ring.requestHealthKitAuthorization()
+                        if granted, healthKitAutoSyncEnabled {
+                            _ = await ring.syncHealthKitNow(requestAuthorizationIfNeeded: false)
+                        }
+                    }
+                }
+            }
+            .disabled(healthKitSyncInProgress)
+
+            if healthKitSyncInProgress {
+                ProgressView("Syncing...")
+            }
+
+            if let lastSync = ring.healthKitLastSyncDate {
+                Text("Last sync: \(lastSync.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(ring.isHealthKitAuthorized()
+                    ? "Ready to sync ring data to Apple Health."
+                    : "Authorize Apple Health access to start syncing.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let error = ring.healthKitLastSyncError, !error.isEmpty {
+                Text(error)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
         }
     }
 

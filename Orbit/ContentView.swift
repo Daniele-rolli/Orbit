@@ -517,14 +517,35 @@ struct SleepWidget: View {
     @Environment(RingSessionManager.self) var ringSessionManager
     @State private var storageSleepRecords: [SleepRecord] = []
 
+    private var sanitizedSleepRecords: [SleepRecord] {
+        let now = Date()
+        let latestAllowed = now.addingTimeInterval(2 * 86400)
+        let earliestAllowed = now.addingTimeInterval(-180 * 86400)
+
+        let filtered = storageSleepRecords.filter {
+            $0.startTime >= earliestAllowed &&
+                $0.endTime <= latestAllowed &&
+                $0.endTime > $0.startTime
+        }
+        let deduped = Dictionary(
+            filtered.map { ("\($0.startTime.timeIntervalSince1970)|\($0.endTime.timeIntervalSince1970)|\($0.sleepType.rawValue)", $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return deduped.values.sorted { $0.startTime < $1.startTime }
+    }
+
     // Most recent sleep session records only
     private var recentRecords: [SleepRecord] {
-        // Group by session (records within 3h of each other form a session)
-        let sorted = storageSleepRecords.sorted { $0.startTime < $1.startTime }
+        let calendar = Calendar.current
+        let now = Date()
+        let today = calendar.startOfDay(for: now)
+
+        // Group by session (records within 90m of each other form a session)
+        let sorted = sanitizedSleepRecords
         var groups: [[SleepRecord]] = []
         var current: [SleepRecord] = []
         for r in sorted {
-            if current.isEmpty || r.startTime.timeIntervalSince(current.last!.endTime) <= 3 * 3600 {
+            if current.isEmpty || r.startTime.timeIntervalSince(current.last!.endTime) <= 90 * 60 {
                 current.append(r)
             } else {
                 groups.append(current)
@@ -532,7 +553,35 @@ struct SleepWidget: View {
             }
         }
         if !current.isEmpty { groups.append(current) }
-        return groups.last ?? []
+        let candidateGroups = groups
+            .map { $0.sorted { $0.startTime < $1.startTime } }
+            .filter { records in
+                guard let wake = records.last?.endTime else { return false }
+                return wake <= now.addingTimeInterval(6 * 3600) &&
+                    calendar.startOfDay(for: wake) == today
+            }
+
+        func nonAwakeMinutes(_ records: [SleepRecord]) -> Int {
+            records.filter { $0.sleepType != .awake }.reduce(0) { $0 + $1.durationMinutes }
+        }
+        func isLikelyMainSleep(_ records: [SleepRecord]) -> Bool {
+            guard let first = records.first, let last = records.last else { return false }
+            let cal = Calendar.current
+            let bedHour = cal.component(.hour, from: first.startTime)
+            let wakeHour = cal.component(.hour, from: last.endTime)
+            let mins = nonAwakeMinutes(records)
+            return (bedHour >= 18 || bedHour <= 6) && wakeHour <= 12 && mins >= 120 && mins <= 14 * 60
+        }
+
+        return candidateGroups.sorted {
+            let lhsMain = isLikelyMainSleep($0) ? 1 : 0
+            let rhsMain = isLikelyMainSleep($1) ? 1 : 0
+            if lhsMain != rhsMain { return lhsMain > rhsMain }
+            let lhsSleep = nonAwakeMinutes($0)
+            let rhsSleep = nonAwakeMinutes($1)
+            if lhsSleep != rhsSleep { return lhsSleep > rhsSleep }
+            return ($0.last?.endTime ?? .distantPast) > ($1.last?.endTime ?? .distantPast)
+        }.first ?? []
     }
 
     private var totalSleepMinutes: Int {
@@ -642,7 +691,14 @@ struct StepsWidget: View {
     @Environment(RingSessionManager.self) var ringSessionManager
     @State private var storageSamples: [ActivitySample] = []
 
-    private var latestSample: ActivitySample? { storageSamples.last }
+    private var validSamples: [ActivitySample] {
+        let latestAllowed = Date().addingTimeInterval(6 * 3600)
+        return storageSamples.filter { $0.timestamp <= latestAllowed }
+    }
+
+    private var latestSample: ActivitySample? {
+        validSamples.max { $0.timestamp < $1.timestamp }
+    }
 
     private var mostRecentDay: Date? {
         guard let last = latestSample else { return nil }
@@ -651,7 +707,7 @@ struct StepsWidget: View {
 
     private var todaySamples: [ActivitySample] {
         guard let day = mostRecentDay else { return [] }
-        return storageSamples.filter {
+        return validSamples.filter {
             Calendar.current.startOfDay(for: $0.timestamp) == day
         }
     }

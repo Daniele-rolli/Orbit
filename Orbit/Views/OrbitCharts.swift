@@ -25,6 +25,31 @@ struct LollipopChart: View {
 
     @State private var selected: Point?
 
+    private var xStrideCount: Int {
+        guard points.count > 1,
+              let start = points.map(\.date).min(),
+              let end = points.map(\.date).max() else { return 1 }
+
+        let spanHours = max(1.0, end.timeIntervalSince(start) / 3600.0)
+        switch xStride {
+        case .hour:
+            if spanHours > 36 { return 8 }
+            if spanHours > 24 { return 6 }
+            if spanHours > 12 { return 4 }
+            if spanHours > 6 { return 2 }
+            return 1
+        case .day:
+            if spanHours > 24 * 90 { return 14 }
+            if spanHours > 24 * 45 { return 7 }
+            if spanHours > 24 * 14 { return 3 }
+            return 1
+        case .weekOfYear:
+            return spanHours > 24 * 180 ? 2 : 1
+        default:
+            return 1
+        }
+    }
+
     var body: some View {
         Chart(points) { pt in
             LineMark(
@@ -50,7 +75,7 @@ struct LollipopChart: View {
         }
         .applyYDomain(yDomain)
         .chartXAxis {
-            AxisMarks(values: .stride(by: xStride)) {
+            AxisMarks(values: .stride(by: xStride, count: xStrideCount)) {
                 AxisGridLine(); AxisValueLabel(format: xFormat)
             }
         }
@@ -77,7 +102,6 @@ struct LollipopChart: View {
                     let xPos = (proxy.position(forX: sel.date) ?? 0) + geo[proxy.plotAreaFrame].origin.x
                     let lineH = geo[proxy.plotAreaFrame].maxY
                     let bW: CGFloat = 100
-                    let bX = max(0, min(geo.size.width - bW, xPos - bW / 2))
 
                     Rectangle().fill(color.opacity(0.7)).frame(width: 2, height: lineH)
                         .position(x: xPos, y: lineH / 2)
@@ -92,7 +116,10 @@ struct LollipopChart: View {
                         RoundedRectangle(cornerRadius: 8).fill(.quaternary.opacity(0.7))
                     }
                     .frame(width: bW)
-                    .offset(x: bX)
+                    .position(
+                        x: max(bW / 2, min(geo.size.width - bW / 2, xPos)),
+                        y: max(24, geo[proxy.plotAreaFrame].minY + 18)
+                    )
                 }
             }
         }
@@ -124,6 +151,15 @@ struct RangeLollipopChart: View {
 
     @State private var selected: Bucket?
 
+    private var dayStrideCount: Int {
+        let n = buckets.count
+        if n > 60 { return 10 }
+        if n > 30 { return 7 }
+        if n > 14 { return 3 }
+        if n > 8 { return 2 }
+        return 1
+    }
+
     var body: some View {
         Chart(buckets) { b in
             // Range bar (capsule) — min to max
@@ -145,7 +181,7 @@ struct RangeLollipopChart: View {
                 }
         }
         .chartXAxis {
-            AxisMarks(values: .stride(by: .day)) {
+            AxisMarks(values: .stride(by: .day, count: dayStrideCount)) {
                 AxisGridLine()
                 AxisValueLabel(format: .dateTime.weekday(.abbreviated))
             }
@@ -170,14 +206,13 @@ struct RangeLollipopChart: View {
         .chartBackground { proxy in
             GeometryReader { geo in
                 if let sel = selected {
-                    let interval = Calendar.current.dateInterval(of: .day, for: sel.date)!
-                    let xPos = (proxy.position(forX: interval.start) ?? 0) + geo[proxy.plotAreaFrame].origin.x
-                    let lineH = geo[proxy.plotAreaFrame].maxY
+                    let plotFrame = geo[proxy.plotAreaFrame]
+                    let xPos = (proxy.position(forX: sel.date) ?? 0) + plotFrame.origin.x
+                    let lineH = plotFrame.height
                     let bW: CGFloat = 110
-                    let bX = max(0, min(geo.size.width - bW, xPos - bW / 2))
 
                     Rectangle().fill(color.opacity(0.8)).frame(width: 2, height: lineH)
-                        .position(x: xPos, y: lineH / 2)
+                        .position(x: xPos, y: plotFrame.midY)
 
                     VStack(alignment: .center, spacing: 2) {
                         Text(sel.date, format: .dateTime.month(.abbreviated).day())
@@ -193,7 +228,10 @@ struct RangeLollipopChart: View {
                         RoundedRectangle(cornerRadius: 8).fill(.quaternary.opacity(0.7))
                     }
                     .frame(width: bW)
-                    .offset(x: bX)
+                    .position(
+                        x: max(bW / 2, min(geo.size.width - bW / 2, xPos)),
+                        y: max(24, plotFrame.minY + 18)
+                    )
                 }
             }
         }
@@ -224,6 +262,22 @@ struct ThresholdBarChart: View {
     let xStride: Calendar.Component
     let xFormat: Date.FormatStyle
 
+    private var xStrideCount: Int {
+        let n = bars.count
+        switch xStride {
+        case .day:
+            if n > 60 { return 10 }
+            if n > 30 { return 7 }
+            if n > 14 { return 3 }
+            if n > 8 { return 2 }
+            return 1
+        case .weekOfYear:
+            return n > 24 ? 2 : 1
+        default:
+            return 1
+        }
+    }
+
     var body: some View {
         Chart {
             ForEach(bars) { b in
@@ -251,7 +305,7 @@ struct ThresholdBarChart: View {
                 }
         }
         .chartXAxis {
-            AxisMarks(values: .stride(by: xStride)) {
+            AxisMarks(values: .stride(by: xStride, count: xStrideCount)) {
                 AxisGridLine(); AxisValueLabel(format: xFormat)
             }
         }
@@ -278,6 +332,15 @@ struct TimeSheetBarChart: View {
     let domainEnd: Date
 
     @State private var selected: Segment?
+
+    private var hourStrideCount: Int {
+        let spanHours = max(1.0, domainEnd.timeIntervalSince(domainStart) / 3600.0)
+        if spanHours > 36 { return 8 }
+        if spanHours > 24 { return 6 }
+        if spanHours > 12 { return 4 }
+        if spanHours > 6 { return 2 }
+        return 1
+    }
 
     var body: some View {
         Chart {
@@ -319,7 +382,7 @@ struct TimeSheetBarChart: View {
         }
         .chartXScale(domain: domainStart...domainEnd)
         .chartXAxis {
-            AxisMarks(values: .stride(by: .hour, count: 2)) {
+            AxisMarks(values: .stride(by: .hour, count: hourStrideCount)) {
                 AxisGridLine()
                 AxisValueLabel(format: .dateTime.hour(.defaultDigits(amPM: .abbreviated)))
             }
@@ -398,7 +461,7 @@ struct ScreenTimeStyleChart: View {
                 }
         }
         .chartXAxis {
-            AxisMarks(values: .stride(by: .day)) {
+            AxisMarks(values: .stride(by: .day, count: 1)) {
                 AxisGridLine(); AxisTick()
                 AxisValueLabel(format: .dateTime.weekday(.narrow))
             }
@@ -439,7 +502,7 @@ struct ScreenTimeStyleChart: View {
         }
         .chartXScale(domain: dayStart...dayEnd)
         .chartXAxis {
-            AxisMarks(values: .stride(by: .hour, count: 3)) {
+            AxisMarks(values: .stride(by: .hour, count: 6)) {
                 AxisGridLine()
                 AxisValueLabel(format: .dateTime.hour(.defaultDigits(amPM: .abbreviated)))
             }

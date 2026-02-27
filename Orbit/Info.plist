@@ -17,6 +17,14 @@
 	<array>
 		<string>Bluetooth</string>
 	</array>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.orbit.ring.sync</string>
+	</array>
+	<key>NSHealthShareUsageDescription</key>
+	<string>Orbit reads Apple Health data to compare and validate your ring measurements.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>Orbit writes ring measurements to Apple Health so all your health data stays in one place.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>
